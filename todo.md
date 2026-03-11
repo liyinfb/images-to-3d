@@ -1,0 +1,16 @@
+# Project TODO
+
+- [x] Dark theme "Void Studio" design with custom color palette
+- [x] Google Fonts integration (Geist/Space Grotesk)
+- [x] Hero landing section with animated background
+- [x] Image upload component with drag-and-drop
+- [x] Backend API endpoint for 3D reconstruction via TRELLIS HuggingFace Space
+- [x] Image upload to S3 storage for processing
+- [x] Progress tracking during 3D reconstruction
+- [x] Interactive 3D model viewer with Three.js
+- [x] GLB model download functionality
+- [x] Reconstruction history (saved models per user)
+- [x] Database schema for reconstruction jobs
+- [x] Responsive design for mobile/tablet
+- [x] Loading states and error handling
+- [x] Vitest tests for backend API
