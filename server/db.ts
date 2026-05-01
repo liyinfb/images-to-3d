@@ -109,7 +109,7 @@ export async function getReconstructionJob(id: number): Promise<ReconstructionJo
 
 export async function updateReconstructionJob(
   id: number,
-  data: Partial<Pick<ReconstructionJob, "status" | "sourceImageUrl" | "sourceImageKey" | "modelUrl" | "modelKey" | "thumbnailUrl" | "progress" | "errorMessage" | "processingTimeMs">>
+  data: Partial<Pick<ReconstructionJob, "status" | "sourceImageUrl" | "sourceImageKey" | "sourceImageUrls" | "modelUrl" | "modelKey" | "thumbnailUrl" | "progress" | "errorMessage" | "processingTimeMs">>
 ): Promise<void> {
   const db = await getDb();
   if (!db) throw new Error("Database not available");

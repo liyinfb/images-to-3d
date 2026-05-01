@@ -15,6 +15,13 @@
       "when": 1773241416471,
       "tag": "0001_violet_gunslinger",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1777622199628,
+      "tag": "0002_elite_toxin",
+      "breakpoints": true
     }
   ]
 }

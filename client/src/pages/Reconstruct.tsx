@@ -2,12 +2,12 @@ import { useAuth } from "@/_core/hooks/useAuth";
 import { getLoginUrl } from "@/const";
 import { trpc } from "@/lib/trpc";
 import Navbar from "@/components/Navbar";
-import ImageUploader from "@/components/ImageUploader";
+import ImageUploader, { type ImageFile } from "@/components/ImageUploader";
 import ModelViewer from "@/components/ModelViewer";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { Loader2, Box, AlertCircle, CheckCircle2, ArrowRight } from "lucide-react";
-import { useState, useCallback, useEffect, useRef } from "react";
+import { Loader2, Box, AlertCircle, CheckCircle2, ArrowRight, Images } from "lucide-react";
+import { useState, useCallback, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 
 type ReconstructionState = "idle" | "uploading" | "processing" | "completed" | "failed";
@@ -15,13 +15,11 @@ type ReconstructionState = "idle" | "uploading" | "processing" | "completed" | "
 export default function Reconstruct() {
   const { isAuthenticated, loading: authLoading } = useAuth();
   const [state, setState] = useState<ReconstructionState>("idle");
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [selectedImages, setSelectedImages] = useState<ImageFile[]>([]);
   const [jobId, setJobId] = useState<number | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [modelUrl, setModelUrl] = useState<string | null>(null);
   const [progress, setProgress] = useState(0);
-  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const createMutation = trpc.reconstruction.create.useMutation();
 
@@ -50,9 +48,8 @@ export default function Reconstruct() {
     }
   }, [statusQuery.data]);
 
-  const handleImageSelected = useCallback((file: File, preview: string) => {
-    setSelectedFile(file);
-    setPreviewUrl(preview);
+  const handleImagesSelected = useCallback((images: ImageFile[]) => {
+    setSelectedImages(images);
     setState("idle");
     setErrorMessage(null);
     setModelUrl(null);
@@ -61,20 +58,22 @@ export default function Reconstruct() {
   }, []);
 
   const handleStartReconstruction = useCallback(async () => {
-    if (!selectedFile || !previewUrl) return;
+    if (selectedImages.length === 0) return;
 
     try {
       setState("uploading");
       setProgress(0);
       setErrorMessage(null);
 
-      // Convert to base64 (strip the data:image/...;base64, prefix)
-      const base64 = previewUrl.split(",")[1];
+      // Convert all images to base64
+      const imagesPayload = selectedImages.map(img => ({
+        base64: img.preview.split(",")[1],
+        filename: img.file.name,
+      }));
 
       setState("processing");
       const result = await createMutation.mutateAsync({
-        imageBase64: base64,
-        filename: selectedFile.name,
+        images: imagesPayload,
       });
 
       setJobId(result.jobId);
@@ -83,12 +82,11 @@ export default function Reconstruct() {
       setState("failed");
       setErrorMessage(error instanceof Error ? error.message : "Failed to start reconstruction");
     }
-  }, [selectedFile, previewUrl, createMutation]);
+  }, [selectedImages, createMutation]);
 
   const handleReset = () => {
     setState("idle");
-    setSelectedFile(null);
-    setPreviewUrl(null);
+    setSelectedImages([]);
     setJobId(null);
     setErrorMessage(null);
     setModelUrl(null);
@@ -111,6 +109,7 @@ export default function Reconstruct() {
   }
 
   const isProcessing = state === "uploading" || state === "processing";
+  const isMultiImage = selectedImages.length > 1;
 
   return (
     <div className="min-h-screen bg-background">
@@ -128,7 +127,9 @@ export default function Reconstruct() {
               3D Reconstruction
             </h1>
             <p className="text-muted-foreground text-lg">
-              Upload a photo and our AI will generate a 3D model from it.
+              Upload one or more photos and our AI will generate a 3D model.
+              {" "}
+              <span className="text-primary/80">Multiple angles = better quality.</span>
             </p>
           </motion.div>
 
@@ -143,22 +144,23 @@ export default function Reconstruct() {
               {/* Image Upload */}
               <div className="glass-panel rounded-xl p-6 space-y-4">
                 <div className="flex items-center justify-between">
-                  <h2 className="font-display font-semibold text-lg">Source Image</h2>
-                  {selectedFile && state === "idle" && (
+                  <h2 className="font-display font-semibold text-lg">Source Images</h2>
+                  {selectedImages.length > 0 && state === "idle" && (
                     <Button variant="ghost" size="sm" onClick={handleReset} className="text-muted-foreground">
                       Clear
                     </Button>
                   )}
                 </div>
                 <ImageUploader
-                  onImageSelected={handleImageSelected}
+                  onImagesSelected={handleImagesSelected}
                   disabled={isProcessing}
+                  maxImages={8}
                 />
               </div>
 
               {/* Reconstruct Button */}
               <AnimatePresence mode="wait">
-                {selectedFile && state === "idle" && (
+                {selectedImages.length > 0 && state === "idle" && (
                   <motion.div
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
@@ -169,9 +171,23 @@ export default function Reconstruct() {
                       className="w-full gap-2 glow-violet text-base"
                       onClick={handleStartReconstruction}
                     >
-                      <Box className="w-5 h-5" />
-                      Generate 3D Model
+                      {isMultiImage ? (
+                        <>
+                          <Images className="w-5 h-5" />
+                          Generate 3D from {selectedImages.length} Views
+                        </>
+                      ) : (
+                        <>
+                          <Box className="w-5 h-5" />
+                          Generate 3D Model
+                        </>
+                      )}
                     </Button>
+                    {isMultiImage && (
+                      <p className="text-xs text-muted-foreground text-center mt-2">
+                        Multi-view mode uses TRELLIS AI for enhanced reconstruction
+                      </p>
+                    )}
                   </motion.div>
                 )}
               </AnimatePresence>
@@ -189,10 +205,16 @@ export default function Reconstruct() {
                       <Loader2 className="w-5 h-5 text-primary animate-spin" />
                       <div>
                         <p className="font-medium text-sm">
-                          {state === "uploading" ? "Uploading image..." : "Generating 3D model..."}
+                          {state === "uploading"
+                            ? "Uploading images..."
+                            : isMultiImage
+                            ? "Generating 3D from multiple views..."
+                            : "Generating 3D model..."}
                         </p>
                         <p className="text-xs text-muted-foreground mt-0.5">
-                          This may take 1-3 minutes depending on complexity
+                          {isMultiImage
+                            ? "Multi-view reconstruction may take 2-5 minutes"
+                            : "This may take 1-3 minutes depending on complexity"}
                         </p>
                       </div>
                     </div>
@@ -241,7 +263,8 @@ export default function Reconstruct() {
                       <div>
                         <p className="font-medium text-sm">3D Model Ready!</p>
                         <p className="text-xs text-muted-foreground mt-0.5">
-                          Your model has been generated successfully.
+                          Your model has been generated successfully
+                          {isMultiImage && " from multiple views"}.
                         </p>
                       </div>
                     </div>
@@ -258,7 +281,7 @@ export default function Reconstruct() {
               </AnimatePresence>
 
               {/* Tips */}
-              {state === "idle" && !selectedFile && (
+              {state === "idle" && selectedImages.length === 0 && (
                 <motion.div
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
@@ -273,6 +296,10 @@ export default function Reconstruct() {
                     </li>
                     <li className="flex items-start gap-2">
                       <ArrowRight className="w-4 h-4 text-primary mt-0.5 shrink-0" />
+                      <span><strong>Multiple angles</strong> (front, side, back) produce much better 3D models</span>
+                    </li>
+                    <li className="flex items-start gap-2">
+                      <ArrowRight className="w-4 h-4 text-primary mt-0.5 shrink-0" />
                       Good lighting and contrast improve reconstruction quality
                     </li>
                     <li className="flex items-start gap-2">
@@ -281,7 +308,7 @@ export default function Reconstruct() {
                     </li>
                     <li className="flex items-start gap-2">
                       <ArrowRight className="w-4 h-4 text-primary mt-0.5 shrink-0" />
-                      Higher resolution images generally produce better models
+                      Upload 2-6 images from different angles for multi-view mode
                     </li>
                   </ul>
                 </motion.div>

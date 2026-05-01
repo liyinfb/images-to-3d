@@ -26,10 +26,16 @@ export const reconstructionJobs = mysqlTable("reconstruction_jobs", {
   userId: int("userId").notNull(),
   /** Status of the reconstruction job */
   status: mysqlEnum("status", ["pending", "processing", "completed", "failed"]).default("pending").notNull(),
-  /** URL of the uploaded source image in S3 */
+  /** Mode of reconstruction: single or multi-image */
+  mode: mysqlEnum("mode", ["single", "multi"]).default("single").notNull(),
+  /** Number of source images uploaded */
+  sourceImageCount: int("sourceImageCount").default(1).notNull(),
+  /** URL of the uploaded source image in S3 (primary/first image) */
   sourceImageUrl: text("sourceImageUrl"),
   /** S3 key for the source image */
   sourceImageKey: varchar("sourceImageKey", { length: 512 }),
+  /** JSON array of all source image URLs (for multi-image mode) */
+  sourceImageUrls: text("sourceImageUrls"),
   /** URL of the resulting GLB model in S3 */
   modelUrl: text("modelUrl"),
   /** S3 key for the GLB model */

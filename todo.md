@@ -16,3 +16,7 @@
 - [x] Vitest tests for backend API
 - [x] Fix Gradio API 404 error when uploading image to TRELLIS space
 - [x] Fix FileNotFoundError during 3D reconstruction processing
+- [x] Multi-image upload UI (allow selecting multiple photos from different angles)
+- [x] Backend support for multi-image 3D reconstruction
+- [x] Image gallery/preview for multiple uploaded images
+- [x] Update reconstruction service to handle multi-image input

@@ -5,7 +5,7 @@ import Navbar from "@/components/Navbar";
 import ModelViewer from "@/components/ModelViewer";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Box, Clock, Download, Eye, Loader2, ArrowRight, AlertCircle } from "lucide-react";
+import { Box, Clock, Download, Eye, Loader2, ArrowRight, AlertCircle, Images } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useState } from "react";
 import { Link } from "wouter";
@@ -198,7 +198,15 @@ export default function History() {
                   {/* Info */}
                   <div className="p-4 space-y-3">
                     <div className="flex items-center justify-between">
-                      {getStatusBadge(job.status)}
+                      <div className="flex items-center gap-2">
+                        {getStatusBadge(job.status)}
+                        {job.mode === "multi" && (
+                          <Badge variant="outline" className="bg-primary/10 text-primary border-primary/30 gap-1">
+                            <Images className="w-3 h-3" />
+                            {job.sourceImageCount}
+                          </Badge>
+                        )}
+                      </div>
                       <span className="text-xs text-muted-foreground font-mono flex items-center gap-1">
                         <Clock className="w-3 h-3" />
                         {formatDuration(job.processingTimeMs)}

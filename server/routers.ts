@@ -5,7 +5,7 @@ import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { z } from "zod";
 import { createReconstructionJob, getReconstructionJob, getUserReconstructionJobs, updateReconstructionJob } from "./db";
 import { storagePut } from "./storage";
-import { reconstructImage } from "./reconstruction";
+import { reconstructImage, reconstructMultipleImages } from "./reconstruction";
 import { nanoid } from "nanoid";
 
 export const appRouter = router({
@@ -20,52 +20,80 @@ export const appRouter = router({
   }),
 
   reconstruction: router({
-    /** Start a new 3D reconstruction from an uploaded image */
+    /** Start a new 3D reconstruction from one or more uploaded images */
     create: protectedProcedure
       .input(z.object({
-        imageBase64: z.string().min(1, "Image data is required"),
-        filename: z.string().default("image.png"),
+        images: z.array(z.object({
+          base64: z.string().min(1, "Image data is required"),
+          filename: z.string().default("image.png"),
+        })).min(1, "At least one image is required").max(8, "Maximum 8 images allowed"),
       }))
       .mutation(async ({ ctx, input }) => {
         const userId = ctx.user.id;
         const uniqueId = nanoid(12);
+        const isMulti = input.images.length > 1;
 
         // Create the job record
         const jobId = await createReconstructionJob({
           userId,
           status: "pending",
           progress: 0,
+          mode: isMulti ? "multi" : "single",
+          sourceImageCount: input.images.length,
         });
 
-        // Process asynchronously — don't await the full reconstruction
-        // Instead, start it and let the client poll for status
+        // Process asynchronously
         (async () => {
           try {
             await updateReconstructionJob(jobId, { status: "processing", progress: 5 });
 
-            // Decode the base64 image
-            const imageBuffer = Buffer.from(input.imageBase64, "base64");
+            // Decode all images
+            const imageBuffers = input.images.map((img, i) => ({
+              buffer: Buffer.from(img.base64, "base64"),
+              filename: img.filename || `image_${i}.png`,
+            }));
 
-            // Upload source image to S3
-            const imageKey = `reconstructions/${userId}/${uniqueId}/source.png`;
-            const { url: sourceImageUrl } = await storagePut(imageKey, imageBuffer, "image/png");
+            // Upload first/primary source image to S3
+            const imageKey = `reconstructions/${userId}/${uniqueId}/source_0.png`;
+            const { url: sourceImageUrl } = await storagePut(imageKey, imageBuffers[0].buffer, "image/png");
+
+            // Upload all images to S3 and store URLs
+            const allImageUrls: string[] = [sourceImageUrl];
+            for (let i = 1; i < imageBuffers.length; i++) {
+              const key = `reconstructions/${userId}/${uniqueId}/source_${i}.png`;
+              const { url } = await storagePut(key, imageBuffers[i].buffer, "image/png");
+              allImageUrls.push(url);
+            }
+
             await updateReconstructionJob(jobId, {
               sourceImageUrl,
               sourceImageKey: imageKey,
+              sourceImageUrls: JSON.stringify(allImageUrls),
               progress: 10,
             });
 
             const startTime = Date.now();
 
             // Run the reconstruction
-            const result = await reconstructImage(
-              imageBuffer,
-              input.filename,
-              async (progress, message) => {
-                console.log(`[Job ${jobId}] Progress: ${progress}% - ${message}`);
-                await updateReconstructionJob(jobId, { progress }).catch(() => {});
-              }
-            );
+            let result;
+            if (isMulti) {
+              result = await reconstructMultipleImages(
+                imageBuffers,
+                async (progress, message) => {
+                  console.log(`[Job ${jobId}] Progress: ${progress}% - ${message}`);
+                  await updateReconstructionJob(jobId, { progress }).catch(() => {});
+                }
+              );
+            } else {
+              result = await reconstructImage(
+                imageBuffers[0].buffer,
+                imageBuffers[0].filename,
+                async (progress, message) => {
+                  console.log(`[Job ${jobId}] Progress: ${progress}% - ${message}`);
+                  await updateReconstructionJob(jobId, { progress }).catch(() => {});
+                }
+              );
+            }
 
             // Upload the GLB model to S3
             const modelKey = `reconstructions/${userId}/${uniqueId}/model.glb`;
@@ -81,7 +109,7 @@ export const appRouter = router({
               processingTimeMs,
             });
 
-            console.log(`[Job ${jobId}] Completed in ${processingTimeMs}ms`);
+            console.log(`[Job ${jobId}] Completed in ${processingTimeMs}ms (${isMulti ? 'multi' : 'single'})`);
           } catch (error) {
             console.error(`[Job ${jobId}] Failed:`, error);
             await updateReconstructionJob(jobId, {

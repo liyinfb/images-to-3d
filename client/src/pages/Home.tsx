@@ -2,7 +2,7 @@ import { useAuth } from "@/_core/hooks/useAuth";
 import { getLoginUrl } from "@/const";
 import { Button } from "@/components/ui/button";
 import Navbar from "@/components/Navbar";
-import { ArrowRight, Box, Sparkles, Zap, Download, RotateCcw } from "lucide-react";
+import { ArrowRight, Box, Sparkles, Zap, Download, RotateCcw, Images } from "lucide-react";
 import { motion } from "framer-motion";
 import { Link } from "wouter";
 
@@ -14,6 +14,11 @@ const features = [
     icon: Sparkles,
     title: "AI-Powered",
     description: "Powered by TRELLIS, a state-of-the-art 3D reconstruction model from Microsoft Research.",
+  },
+  {
+    icon: Images,
+    title: "Multi-View Support",
+    description: "Upload multiple photos from different angles for significantly better 3D reconstruction quality.",
   },
   {
     icon: Zap,
@@ -81,7 +86,7 @@ export default function Home() {
 
             {/* Subtitle */}
             <p className="text-lg sm:text-xl text-muted-foreground max-w-2xl mx-auto leading-relaxed">
-              Upload a single photograph and watch as AI reconstructs a detailed,
+              Upload one or multiple photographs and watch as AI reconstructs a detailed,
               interactive 3D model you can explore from every angle.
             </p>
 
@@ -172,7 +177,7 @@ export default function Home() {
           {/* Steps */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
             {[
-              { step: "01", title: "Upload", desc: "Drop any photograph of an object — the clearer the subject, the better the result." },
+              { step: "01", title: "Upload", desc: "Drop one or more photographs of an object — multiple angles produce better results." },
               { step: "02", title: "Reconstruct", desc: "Our AI analyzes the image and generates a full 3D mesh with textures automatically." },
               { step: "03", title: "Explore & Download", desc: "View your 3D model interactively and download it in GLB format for any use." },
             ].map((item, i) => (

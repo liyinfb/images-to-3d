@@ -49,8 +49,7 @@ describe("reconstruction router", () => {
 
     await expect(
       caller.reconstruction.create({
-        imageBase64: "dGVzdA==",
-        filename: "test.png",
+        images: [{ base64: "dGVzdA==", filename: "test.png" }],
       })
     ).rejects.toThrow();
   });
@@ -87,16 +86,77 @@ describe("reconstruction router", () => {
     expect(Array.isArray(result)).toBe(true);
   });
 
-  it("validates create input - rejects empty imageBase64", async () => {
+  it("validates create input - rejects empty images array", async () => {
+    const ctx = createAuthContext();
+    const caller = appRouter.createCaller(ctx);
+
+    await expect(
+      caller.reconstruction.create({ images: [] })
+    ).rejects.toThrow();
+  });
+
+  it("validates create input - rejects empty base64", async () => {
     const ctx = createAuthContext();
     const caller = appRouter.createCaller(ctx);
 
     await expect(
       caller.reconstruction.create({
-        imageBase64: "",
-        filename: "test.png",
+        images: [{ base64: "", filename: "test.png" }],
       })
     ).rejects.toThrow();
+  });
+
+  it("validates create input - rejects more than 8 images", async () => {
+    const ctx = createAuthContext();
+    const caller = appRouter.createCaller(ctx);
+
+    const images = Array.from({ length: 9 }, (_, i) => ({
+      base64: "dGVzdA==",
+      filename: `image_${i}.png`,
+    }));
+
+    await expect(
+      caller.reconstruction.create({ images })
+    ).rejects.toThrow();
+  });
+
+  it("accepts single image input and returns jobId", async () => {
+    const ctx = createAuthContext();
+    const caller = appRouter.createCaller(ctx);
+
+    const result = await caller.reconstruction.create({
+      images: [{ base64: "dGVzdA==", filename: "test.png" }],
+    });
+
+    expect(result).toHaveProperty("jobId");
+    expect(typeof result.jobId).toBe("number");
+  });
+
+  it("accepts multiple images input and returns jobId", async () => {
+    const ctx = createAuthContext();
+    const caller = appRouter.createCaller(ctx);
+
+    const result = await caller.reconstruction.create({
+      images: [
+        { base64: "dGVzdA==", filename: "front.png" },
+        { base64: "dGVzdA==", filename: "side.png" },
+        { base64: "dGVzdA==", filename: "back.png" },
+      ],
+    });
+
+    expect(result).toHaveProperty("jobId");
+    expect(typeof result.jobId).toBe("number");
+  });
+
+  it("defaults filename when not provided", async () => {
+    const ctx = createAuthContext();
+    const caller = appRouter.createCaller(ctx);
+
+    const result = await caller.reconstruction.create({
+      images: [{ base64: "dGVzdA==" }],
+    });
+
+    expect(result).toHaveProperty("jobId");
   });
 });
 

@@ -1,25 +1,19 @@
 /**
  * 3D Reconstruction Service
  *
- * Uses the frogleo/Image-to-3D HuggingFace Space as the primary backend.
- * This space uses TripoSR-based model and provides reliable GLB output.
+ * Supports two modes:
+ * 1. Single-image: Uses frogleo/Image-to-3D (primary) with TRELLIS fallback
+ * 2. Multi-image: Uses TRELLIS community space which supports multi-view gallery input
  *
- * Space: https://huggingface.co/spaces/frogleo/Image-to-3D
- * Gradio version: 4.44.1 (uses /upload, /queue/join, /queue/data - no gradio_api prefix)
- *
- * API: gen_shape (fn_index=1)
- * Inputs (8): [image, inference_steps, guidance_scale, seed, octree_res, num_chunks, target_faces, randomize_seed]
- * Outputs (4): [html_viewer, download_button(OBJ), glb_path, obj_path]
- *
- * Fallback: TRELLIS community space (if primary is unavailable)
+ * Primary Space: https://huggingface.co/spaces/frogleo/Image-to-3D
+ * Multi-view Space: https://huggingface.co/spaces/trellis-community/TRELLIS
  */
 
 // Primary space (frogleo/Image-to-3D - Gradio 4.x, no prefix needed)
 const PRIMARY_SPACE_URL = "https://frogleo-image-to-3d.hf.space";
 
-// Fallback space (TRELLIS - Gradio 5.x, needs /gradio_api/ prefix)
-const FALLBACK_SPACE_URL = "https://trellis-community-trellis.hf.space";
-const FALLBACK_API = `${FALLBACK_SPACE_URL}/gradio_api`;
+// TRELLIS space (Gradio 5.x, needs /gradio_api/ prefix) - supports multi-image
+const TRELLIS_SPACE_URL = "https://trellis-community-trellis.hf.space";
 
 /**
  * Upload a file to a Gradio space
@@ -46,6 +40,37 @@ async function uploadToSpace(
   if (!response.ok) {
     const text = await response.text();
     throw new Error(`Upload failed: ${response.status} ${text}`);
+  }
+
+  return await response.json();
+}
+
+/**
+ * Upload multiple files to a Gradio space
+ */
+async function uploadMultipleToSpace(
+  spaceUrl: string,
+  images: { buffer: Buffer; filename: string }[],
+  useGradioApiPrefix: boolean = false
+): Promise<string[]> {
+  const uploadUrl = useGradioApiPrefix
+    ? `${spaceUrl}/gradio_api/upload`
+    : `${spaceUrl}/upload`;
+
+  const formData = new FormData();
+  for (const img of images) {
+    const blob = new Blob([new Uint8Array(img.buffer)], { type: "image/png" });
+    formData.append("files", blob, img.filename);
+  }
+
+  const response = await fetch(uploadUrl, {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Multi-upload failed: ${response.status} ${text}`);
   }
 
   return await response.json();
@@ -202,16 +227,35 @@ async function downloadFile(spaceUrl: string, filePath: string): Promise<Buffer>
   return Buffer.from(await response.arrayBuffer());
 }
 
+/**
+ * Find GLB path from output data
+ */
+function findGlbPath(outputData: any[]): string | null {
+  for (const item of outputData) {
+    if (!item) continue;
+    if (typeof item === "string" && item.includes(".glb")) {
+      return item;
+    }
+    if (typeof item === "object") {
+      const p = item.path || item.url || (item.value && (item.value.path || item.value.url));
+      if (p && typeof p === "string" && p.includes(".glb")) {
+        return p;
+      }
+    }
+  }
+  return null;
+}
+
 export interface ReconstructionResult {
   glbBuffer: Buffer;
   filename: string;
 }
 
 /**
- * Primary reconstruction using frogleo/Image-to-3D space.
+ * Single-image reconstruction using frogleo/Image-to-3D space.
  * Simple single-call API with no session management needed.
  */
-async function reconstructWithPrimary(
+async function reconstructSingleImage(
   imageBuffer: Buffer,
   filename: string,
   onProgress?: (progress: number, message: string) => void
@@ -239,13 +283,12 @@ async function reconstructWithPrimary(
   };
 
   // Call gen_shape (fn_index=1)
-  // Inputs: [image, inference_steps, guidance_scale, seed, octree_res, num_chunks, target_faces, randomize_seed]
   const result = await submitAndWait(
     PRIMARY_SPACE_URL,
     1,
     [imageRef, 5, 5.5, 1234, 256, 8000, 10000, true],
     sessionHash,
-    3 * 60 * 1000, // 3 minute timeout
+    3 * 60 * 1000,
     false,
     (msg) => onProgress?.(40, msg)
   );
@@ -255,39 +298,12 @@ async function reconstructWithPrimary(
   const outputData = result?.data || [];
   console.log("[Reconstruction] Primary: generation complete, outputs:", outputData.length);
 
-  // Output[2] is the GLB path (string like "/static/.../white_mesh.glb")
-  let glbPath: string | null = null;
+  // Output[2] is the GLB path
+  let glbPath = findGlbPath(outputData);
 
-  // Check output[2] first (GLB path)
-  if (outputData[2] && typeof outputData[2] === "string" && outputData[2].includes(".glb")) {
+  // Check output[2] specifically
+  if (!glbPath && outputData[2] && typeof outputData[2] === "string" && outputData[2].includes(".glb")) {
     glbPath = outputData[2];
-  }
-
-  // Fallback: check output[1] (download button with OBJ, but may have GLB)
-  if (!glbPath && outputData[1] && typeof outputData[1] === "object") {
-    const val = outputData[1].value || outputData[1];
-    const path = val.path || val.url;
-    if (path && typeof path === "string") {
-      // This is the OBJ, but let's check if there's a GLB variant
-      glbPath = path.replace(".obj", ".glb");
-    }
-  }
-
-  // Try to find GLB in any output
-  if (!glbPath) {
-    for (const item of outputData) {
-      if (typeof item === "string" && item.includes(".glb")) {
-        glbPath = item;
-        break;
-      }
-      if (item && typeof item === "object") {
-        const p = item.path || item.url || (item.value && (item.value.path || item.value.url));
-        if (p && typeof p === "string" && p.includes(".glb")) {
-          glbPath = p;
-          break;
-        }
-      }
-    }
   }
 
   if (!glbPath) {
@@ -311,10 +327,122 @@ async function reconstructWithPrimary(
 }
 
 /**
- * Fallback reconstruction using TRELLIS community space.
- * Requires session management (start_session → preprocess → generate).
+ * Multi-image reconstruction using TRELLIS community space.
+ * Uses the gallery input (component 8) and preprocess_images (fn=9).
+ *
+ * TRELLIS generate_and_extract_glb (fn=11) inputs:
+ *   [image(6), gallery(8), state(39), seed(11), guidance_strength(15),
+ *    sampling_steps(16), guidance_strength_2(20), sampling_steps_2(21),
+ *    multi_image_algorithm(23), simplify(27), texture_size(28)]
  */
-async function reconstructWithFallback(
+async function reconstructMultiImage(
+  images: { buffer: Buffer; filename: string }[],
+  onProgress?: (progress: number, message: string) => void
+): Promise<ReconstructionResult> {
+  const sessionHash = `trellis_multi_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+
+  onProgress?.(5, "Uploading images to TRELLIS...");
+
+  // Upload all images
+  const paths = await uploadMultipleToSpace(TRELLIS_SPACE_URL, images, true);
+  if (!paths || paths.length === 0) throw new Error("Multi-image upload failed");
+  console.log(`[Reconstruction] Multi: uploaded ${paths.length} images`);
+
+  onProgress?.(15, "Initializing GPU session...");
+
+  // Start session (fn=4)
+  await submitAndWait(TRELLIS_SPACE_URL, 4, [], sessionHash, 30_000, true);
+
+  onProgress?.(20, "Preprocessing images...");
+
+  // Build gallery references
+  const galleryRefs = paths.map((filePath, i) => ({
+    image: {
+      path: filePath,
+      url: `${TRELLIS_SPACE_URL}/file=${filePath}`,
+      orig_name: images[i].filename,
+      size: images[i].buffer.length,
+      mime_type: "image/png",
+      meta: { _type: "gradio.FileData" },
+    },
+    caption: null,
+  }));
+
+  // Preprocess images (fn=9) - takes gallery component
+  const preprocessResult = await submitAndWait(
+    TRELLIS_SPACE_URL,
+    9,
+    [galleryRefs],
+    sessionHash,
+    60_000,
+    true
+  );
+  const preprocessedGallery = preprocessResult?.data?.[0] || galleryRefs;
+  console.log("[Reconstruction] Multi: images preprocessed");
+
+  onProgress?.(30, "Generating 3D model from multiple views (1-3 minutes)...");
+
+  // Generate 3D model (fn=11)
+  // Inputs: [image(null for multi), gallery, state(null), seed, guidance1, steps1, guidance2, steps2, algorithm, simplify, texture_size]
+  const genResult = await submitAndWait(
+    TRELLIS_SPACE_URL,
+    11,
+    [
+      null,                    // image (component 6) - null for multi-image mode
+      preprocessedGallery,    // gallery (component 8) - preprocessed images
+      null,                   // state (component 39)
+      0,                      // seed (component 11)
+      7.5,                    // guidance_strength (component 15)
+      12,                     // sampling_steps (component 16)
+      3.0,                    // guidance_strength_2 (component 20)
+      12,                     // sampling_steps_2 (component 21)
+      "stochastic",           // multi_image_algorithm (component 23)
+      0.95,                   // simplify (component 27)
+      1024,                   // texture_size (component 28)
+    ],
+    sessionHash,
+    5 * 60 * 1000,
+    true,
+    (msg) => onProgress?.(50, msg)
+  );
+
+  onProgress?.(85, "Downloading 3D model...");
+
+  const outputData = genResult?.data || [];
+  console.log("[Reconstruction] Multi: generation complete, outputs:", outputData.length);
+
+  // Find GLB in outputs
+  let glbPath = findGlbPath(outputData);
+
+  if (!glbPath) {
+    // Try downloading each file output and checking for GLB magic bytes
+    for (const item of outputData) {
+      if (!item || typeof item !== "object") continue;
+      const path = item.path || item.url;
+      if (!path || typeof path !== "string") continue;
+      try {
+        const buf = await downloadFile(TRELLIS_SPACE_URL, path);
+        if (buf.length > 4 && buf.readUInt32LE(0) === 0x46546c67) {
+          return { glbBuffer: buf, filename: `model_multi_${Date.now()}.glb` };
+        }
+      } catch {
+        continue;
+      }
+    }
+    throw new Error("No GLB file found in TRELLIS multi-image output");
+  }
+
+  const glbBuffer = await downloadFile(TRELLIS_SPACE_URL, glbPath);
+  if (!glbBuffer || glbBuffer.length === 0) throw new Error("Downloaded GLB is empty");
+
+  onProgress?.(100, "3D model ready!");
+  return { glbBuffer, filename: `model_multi_${Date.now()}.glb` };
+}
+
+/**
+ * TRELLIS single-image fallback reconstruction.
+ */
+async function reconstructWithTrellisSingle(
   imageBuffer: Buffer,
   filename: string,
   onProgress?: (progress: number, message: string) => void
@@ -324,35 +452,35 @@ async function reconstructWithFallback(
   onProgress?.(10, "Uploading image (fallback)...");
 
   // Upload
-  const paths = await uploadToSpace(FALLBACK_SPACE_URL, imageBuffer, filename, true);
+  const paths = await uploadToSpace(TRELLIS_SPACE_URL, imageBuffer, filename, true);
   if (!paths || paths.length === 0) throw new Error("Upload failed");
   const filePath = paths[0];
 
   onProgress?.(15, "Initializing GPU session...");
 
   // Start session
-  await submitAndWait(FALLBACK_SPACE_URL, 4, [], sessionHash, 30_000, true);
+  await submitAndWait(TRELLIS_SPACE_URL, 4, [], sessionHash, 30_000, true);
 
   onProgress?.(20, "Preprocessing image...");
 
-  // Preprocess
+  // Preprocess single image (fn=8)
   const imageRef = {
     path: filePath,
-    url: `${FALLBACK_SPACE_URL}/file=${filePath}`,
+    url: `${TRELLIS_SPACE_URL}/file=${filePath}`,
     orig_name: filename,
     size: imageBuffer.length,
     mime_type: "image/png",
     meta: { _type: "gradio.FileData" },
   };
 
-  const preprocessResult = await submitAndWait(FALLBACK_SPACE_URL, 8, [imageRef], sessionHash, 60_000, true);
+  const preprocessResult = await submitAndWait(TRELLIS_SPACE_URL, 8, [imageRef], sessionHash, 60_000, true);
   const preprocessedImage = preprocessResult?.data?.[0] || imageRef;
 
   onProgress?.(30, "Generating 3D model (1-3 minutes)...");
 
-  // Generate
+  // Generate with single image
   const genResult = await submitAndWait(
-    FALLBACK_SPACE_URL,
+    TRELLIS_SPACE_URL,
     11,
     [preprocessedImage, [], null, 0, 7.5, 12, 3.0, 12, "stochastic", 0.95, 1024],
     sessionHash,
@@ -364,32 +492,15 @@ async function reconstructWithFallback(
   onProgress?.(85, "Downloading 3D model...");
 
   const outputData = genResult?.data || [];
-
-  // Find GLB in outputs
-  let glbPath: string | null = null;
-  for (const item of outputData) {
-    if (!item) continue;
-    if (typeof item === "string" && item.includes(".glb")) {
-      glbPath = item;
-      break;
-    }
-    if (typeof item === "object") {
-      const p = item.path || item.url || (item.value && (item.value.path || item.value.url));
-      if (p && typeof p === "string" && p.includes(".glb")) {
-        glbPath = p;
-        break;
-      }
-    }
-  }
+  let glbPath = findGlbPath(outputData);
 
   if (!glbPath) {
-    // Try downloading each file output and checking for GLB magic bytes
     for (const item of outputData) {
       if (!item || typeof item !== "object") continue;
       const path = item.path || item.url;
       if (!path || typeof path !== "string") continue;
       try {
-        const buf = await downloadFile(FALLBACK_SPACE_URL, path);
+        const buf = await downloadFile(TRELLIS_SPACE_URL, path);
         if (buf.length > 4 && buf.readUInt32LE(0) === 0x46546c67) {
           return { glbBuffer: buf, filename: `model_${Date.now()}.glb` };
         }
@@ -400,7 +511,7 @@ async function reconstructWithFallback(
     throw new Error("No GLB file found in TRELLIS output");
   }
 
-  const glbBuffer = await downloadFile(FALLBACK_SPACE_URL, glbPath);
+  const glbBuffer = await downloadFile(TRELLIS_SPACE_URL, glbPath);
   if (!glbBuffer || glbBuffer.length === 0) throw new Error("Downloaded GLB is empty");
 
   onProgress?.(100, "3D model ready!");
@@ -408,7 +519,7 @@ async function reconstructWithFallback(
 }
 
 /**
- * Main reconstruction function with automatic fallback.
+ * Main reconstruction function for single image with automatic fallback.
  */
 export async function reconstructImage(
   imageBuffer: Buffer,
@@ -418,7 +529,7 @@ export async function reconstructImage(
   // Try primary space first
   try {
     onProgress?.(5, "Connecting to reconstruction service...");
-    return await reconstructWithPrimary(imageBuffer, filename, onProgress);
+    return await reconstructSingleImage(imageBuffer, filename, onProgress);
   } catch (primaryError) {
     const errorMsg = (primaryError as Error).message;
     console.error("[Reconstruction] Primary failed:", errorMsg);
@@ -432,16 +543,15 @@ export async function reconstructImage(
       errorMsg.includes("SSE") ||
       errorMsg.includes("Upload failed")
     ) {
-      console.log("[Reconstruction] Trying fallback (TRELLIS)...");
+      console.log("[Reconstruction] Trying fallback (TRELLIS single)...");
       onProgress?.(5, "Primary service busy, trying alternative...");
 
       try {
-        return await reconstructWithFallback(imageBuffer, filename, onProgress);
+        return await reconstructWithTrellisSingle(imageBuffer, filename, onProgress);
       } catch (fallbackError) {
         const fbMsg = (fallbackError as Error).message;
         console.error("[Reconstruction] Fallback also failed:", fbMsg);
 
-        // Provide a user-friendly error message
         if (fbMsg.includes("GPU quota")) {
           throw new Error(
             "Both reconstruction services have exceeded their GPU quota. " +
@@ -454,7 +564,6 @@ export async function reconstructImage(
       }
     }
 
-    // For other errors, provide helpful message
     if (errorMsg.includes("GPU quota")) {
       throw new Error(
         "The reconstruction service has exceeded its GPU quota. " +
@@ -463,5 +572,41 @@ export async function reconstructImage(
     }
 
     throw primaryError;
+  }
+}
+
+/**
+ * Multi-image reconstruction function.
+ * Uses TRELLIS which natively supports multi-view input.
+ */
+export async function reconstructMultipleImages(
+  images: { buffer: Buffer; filename: string }[],
+  onProgress?: (progress: number, message: string) => void
+): Promise<ReconstructionResult> {
+  if (images.length === 0) {
+    throw new Error("At least one image is required");
+  }
+
+  if (images.length === 1) {
+    // For single image, use the standard pipeline with fallback
+    return reconstructImage(images[0].buffer, images[0].filename, onProgress);
+  }
+
+  // For multiple images, use TRELLIS multi-view
+  onProgress?.(5, "Connecting to multi-view reconstruction service...");
+  try {
+    return await reconstructMultiImage(images, onProgress);
+  } catch (error) {
+    const errorMsg = (error as Error).message;
+    console.error("[Reconstruction] Multi-image failed:", errorMsg);
+
+    if (errorMsg.includes("GPU quota")) {
+      throw new Error(
+        "The multi-view reconstruction service has exceeded its GPU quota. " +
+        "This is a limitation of free HuggingFace Spaces. Please try again in a few hours."
+      );
+    }
+
+    throw error;
   }
 }
