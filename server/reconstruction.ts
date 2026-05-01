@@ -578,6 +578,7 @@ export async function reconstructImage(
 /**
  * Multi-image reconstruction function.
  * Uses TRELLIS which natively supports multi-view input.
+ * Falls back to frogleo single-image using the primary (first) image if TRELLIS is unavailable.
  */
 export async function reconstructMultipleImages(
   images: { buffer: Buffer; filename: string }[],
@@ -592,21 +593,34 @@ export async function reconstructMultipleImages(
     return reconstructImage(images[0].buffer, images[0].filename, onProgress);
   }
 
-  // For multiple images, use TRELLIS multi-view
+  // For multiple images, try TRELLIS multi-view first, then fall back to frogleo with primary image
   onProgress?.(5, "Connecting to multi-view reconstruction service...");
   try {
     return await reconstructMultiImage(images, onProgress);
   } catch (error) {
     const errorMsg = (error as Error).message;
-    console.error("[Reconstruction] Multi-image failed:", errorMsg);
+    console.error("[Reconstruction] Multi-image TRELLIS failed:", errorMsg);
 
-    if (errorMsg.includes("GPU quota")) {
+    // Fall back to single-image reconstruction using the primary (first) image
+    console.log("[Reconstruction] Falling back to single-image mode with primary image...");
+    onProgress?.(10, "Multi-view service unavailable, using primary image for reconstruction...");
+
+    try {
+      return await reconstructSingleImage(images[0].buffer, images[0].filename, onProgress);
+    } catch (fallbackError) {
+      const fbMsg = (fallbackError as Error).message;
+      console.error("[Reconstruction] Single-image fallback also failed:", fbMsg);
+
+      if (fbMsg.includes("GPU quota") || errorMsg.includes("GPU quota")) {
+        throw new Error(
+          "Both reconstruction services have exceeded their GPU quota. " +
+          "This is a limitation of free HuggingFace Spaces. Please try again in a few hours."
+        );
+      }
+
       throw new Error(
-        "The multi-view reconstruction service has exceeded its GPU quota. " +
-        "This is a limitation of free HuggingFace Spaces. Please try again in a few hours."
+        `Multi-view failed: ${errorMsg}. Single-image fallback also failed: ${fbMsg}`
       );
     }
-
-    throw error;
   }
 }

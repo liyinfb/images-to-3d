@@ -20,3 +20,4 @@
 - [x] Backend support for multi-image 3D reconstruction
 - [x] Image gallery/preview for multiple uploaded images
 - [x] Update reconstruction service to handle multi-image input
+- [x] Fix GPU quota issue: make multi-image reconstruction work without TRELLIS quota dependency
