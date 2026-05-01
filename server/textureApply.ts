@@ -2,16 +2,46 @@
  * Texture Application Service
  *
  * Takes a geometry-only GLB and a source image, then:
- * 1. Generates UV coordinates using spherical projection
+ * 1. Generates UV coordinates using the specified projection mode
  * 2. Computes vertex normals for proper lighting
  * 3. Embeds the source image as a texture
  * 4. Outputs a fully textured GLB file
+ *
+ * Projection modes:
+ * - "spherical": Wraps texture around the model like a sphere (good for single-image, all-around objects)
+ * - "front": Projects texture from the front (good for multi-image fallback, preserves front-facing detail)
  */
+
+export type ProjectionMode = "spherical" | "front";
 
 interface Vec3 {
   x: number;
   y: number;
   z: number;
+}
+
+/**
+ * Check if a GLB file already has textures/materials embedded.
+ * Used to skip re-texturing when TRELLIS multi-view already outputs textured models.
+ */
+export function hasExistingTexture(glbBuffer: Buffer): boolean {
+  try {
+    const { gltf } = parseGlb(glbBuffer);
+    // Check if the model already has materials with textures
+    if (gltf.materials && gltf.materials.length > 0) {
+      for (const mat of gltf.materials) {
+        if (mat.pbrMetallicRoughness?.baseColorTexture) return true;
+        if (mat.emissiveTexture) return true;
+        if (mat.normalTexture) return true;
+      }
+    }
+    // Also check if there are images embedded
+    if (gltf.images && gltf.images.length > 0) return true;
+    if (gltf.textures && gltf.textures.length > 0) return true;
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -103,6 +133,7 @@ function readIndices(gltf: any, binChunk: Buffer): Uint32Array | null {
 /**
  * Generate spherical UV coordinates from vertex positions.
  * Projects the texture around the model like wrapping a photo around a sphere.
+ * Best for single-image mode where the photo should wrap around the entire object.
  */
 function generateSphericalUVs(positions: Float32Array): Float32Array {
   const count = positions.length / 3;
@@ -139,6 +170,49 @@ function generateSphericalUVs(positions: Float32Array): Float32Array {
 
     uvs[i * 2] = (theta + Math.PI) / (2 * Math.PI); // U: 0 to 1
     uvs[i * 2 + 1] = phi / Math.PI; // V: 0 to 1
+  }
+
+  return uvs;
+}
+
+/**
+ * Generate front-facing planar UV coordinates.
+ * Projects the texture from the front (positive Z direction) onto the model.
+ * Best for multi-image fallback where the primary image is a front view.
+ * This preserves the correct spatial relationship between the photo and the front of the model.
+ */
+function generateFrontProjectionUVs(positions: Float32Array): Float32Array {
+  const count = positions.length / 3;
+  const uvs = new Float32Array(count * 2);
+
+  // Find bounding box
+  let minX = Infinity, maxX = -Infinity;
+  let minY = Infinity, maxY = -Infinity;
+
+  for (let i = 0; i < count; i++) {
+    const x = positions[i * 3];
+    const y = positions[i * 3 + 1];
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+
+  const rangeX = maxX - minX || 1;
+  const rangeY = maxY - minY || 1;
+
+  // Use the larger range to maintain aspect ratio
+  const range = Math.max(rangeX, rangeY);
+  const offsetX = (range - rangeX) / 2;
+  const offsetY = (range - rangeY) / 2;
+
+  for (let i = 0; i < count; i++) {
+    const x = positions[i * 3];
+    const y = positions[i * 3 + 1];
+
+    // Project from front: X maps to U, Y maps to V (inverted for image coords)
+    uvs[i * 2] = (x - minX + offsetX) / range;       // U: 0 to 1
+    uvs[i * 2 + 1] = 1.0 - (y - minY + offsetY) / range; // V: 0 to 1 (flipped for image)
   }
 
   return uvs;
@@ -203,11 +277,17 @@ function computeNormals(positions: Float32Array, indices: Uint32Array | null): F
 
 /**
  * Build a new GLB with texture applied
+ *
+ * @param glbBuffer - The geometry-only GLB buffer
+ * @param imageBuffer - The source image to use as texture
+ * @param imageMimeType - MIME type of the image
+ * @param projectionMode - How to project the texture: "spherical" (wrap around) or "front" (planar from front)
  */
 export async function applyTextureToGlb(
   glbBuffer: Buffer,
   imageBuffer: Buffer,
-  imageMimeType: string = "image/png"
+  imageMimeType: string = "image/png",
+  projectionMode: ProjectionMode = "spherical"
 ): Promise<Buffer> {
   const { gltf, binChunk } = parseGlb(glbBuffer);
 
@@ -220,8 +300,11 @@ export async function applyTextureToGlb(
   const indices = readIndices(gltf, binChunk);
   const vertexCount = positions.length / 3;
 
-  // Generate UVs and normals
-  const uvs = generateSphericalUVs(positions);
+  // Generate UVs based on projection mode
+  const uvs = projectionMode === "front"
+    ? generateFrontProjectionUVs(positions)
+    : generateSphericalUVs(positions);
+
   const normals = computeNormals(positions, indices);
 
   // Build new binary data: original bin + UVs + normals + image
@@ -265,9 +348,6 @@ export async function applyTextureToGlb(
   // Update glTF JSON
 
   // Add buffer views for UVs, normals, and image
-  const existingBVCount = gltf.bufferViews?.length || 0;
-  const existingAccCount = gltf.accessors?.length || 0;
-
   if (!gltf.bufferViews) gltf.bufferViews = [];
   if (!gltf.accessors) gltf.accessors = [];
 
@@ -335,8 +415,8 @@ export async function applyTextureToGlb(
   gltf.samplers.push({
     magFilter: 9729, // LINEAR
     minFilter: 9987, // LINEAR_MIPMAP_LINEAR
-    wrapS: 10497, // REPEAT
-    wrapT: 10497,
+    wrapS: 33071, // CLAMP_TO_EDGE (better for front projection to avoid wrapping artifacts)
+    wrapT: 33071,
   });
 
   // Add texture

@@ -24,3 +24,4 @@
 - [x] Apply texture from uploaded photo to 3D model
 - [x] Render 3D model with texture in the viewer
 - [x] Ensure reconstruction API outputs textured GLB
+- [x] Fix incorrect texture placement when multiple images are used for reconstruction

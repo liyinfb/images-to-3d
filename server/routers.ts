@@ -6,7 +6,7 @@ import { z } from "zod";
 import { createReconstructionJob, getReconstructionJob, getUserReconstructionJobs, updateReconstructionJob } from "./db";
 import { storagePut } from "./storage";
 import { reconstructImage, reconstructMultipleImages } from "./reconstruction";
-import { applyTextureToGlb } from "./textureApply";
+import { applyTextureToGlb, hasExistingTexture } from "./textureApply";
 import { nanoid } from "nanoid";
 
 export const appRouter = router({
@@ -77,6 +77,7 @@ export const appRouter = router({
 
             // Run the reconstruction
             let result;
+            let usedTrellisMultiView = false;
             if (isMulti) {
               result = await reconstructMultipleImages(
                 imageBuffers,
@@ -85,6 +86,9 @@ export const appRouter = router({
                   await updateReconstructionJob(jobId, { progress }).catch(() => {});
                 }
               );
+              // Check if TRELLIS multi-view was used (it outputs textured models natively)
+              // If the GLB already has materials/textures, skip re-texturing
+              usedTrellisMultiView = hasExistingTexture(result.glbBuffer);
             } else {
               result = await reconstructImage(
                 imageBuffers[0].buffer,
@@ -97,15 +101,25 @@ export const appRouter = router({
             }
 
             // Apply texture from source image to the 3D model
-            console.log(`[Job ${jobId}] Applying texture from source image...`);
-            await updateReconstructionJob(jobId, { progress: 90 }).catch(() => {});
+            // Skip if TRELLIS multi-view already produced a textured model
             let finalGlb = result.glbBuffer;
-            try {
-              finalGlb = await applyTextureToGlb(result.glbBuffer, imageBuffers[0].buffer, "image/png");
-              console.log(`[Job ${jobId}] Texture applied successfully (${finalGlb.length} bytes)`);
-            } catch (texError) {
-              console.warn(`[Job ${jobId}] Texture application failed, using untextured model:`, texError);
-              // Continue with the untextured model rather than failing
+            if (usedTrellisMultiView) {
+              console.log(`[Job ${jobId}] TRELLIS multi-view produced textured model, skipping re-texturing`);
+            } else {
+              console.log(`[Job ${jobId}] Applying texture from source image...`);
+              await updateReconstructionJob(jobId, { progress: 90 }).catch(() => {});
+              try {
+                finalGlb = await applyTextureToGlb(
+                  result.glbBuffer,
+                  imageBuffers[0].buffer,
+                  "image/png",
+                  isMulti ? "front" : "spherical"
+                );
+                console.log(`[Job ${jobId}] Texture applied successfully (${finalGlb.length} bytes)`);
+              } catch (texError) {
+                console.warn(`[Job ${jobId}] Texture application failed, using untextured model:`, texError);
+                // Continue with the untextured model rather than failing
+              }
             }
 
             // Upload the GLB model to S3
