@@ -1,92 +1,72 @@
 /**
  * 3D Reconstruction Service
  *
- * Integrates with the TRELLIS model on Hugging Face via the Gradio HTTP API (SSE v3)
- * to convert 2D images into 3D GLB models.
+ * Uses the frogleo/Image-to-3D HuggingFace Space as the primary backend.
+ * This space uses TripoSR-based model and provides reliable GLB output.
  *
- * IMPORTANT: The TRELLIS space uses Gradio SSE v3 protocol which requires
- * the `/gradio_api/` prefix for all API endpoints:
- *   - Upload:     POST /gradio_api/upload
- *   - Queue join: POST /gradio_api/queue/join
- *   - Queue data: GET  /gradio_api/queue/data?session_hash=...
- *   - File:       GET  /file=<path>  (this one works without prefix too)
+ * Space: https://huggingface.co/spaces/frogleo/Image-to-3D
+ * Gradio version: 4.44.1 (uses /upload, /queue/join, /queue/data - no gradio_api prefix)
  *
- * API Discovery (from /config):
- *   fn_index=4:  start_session (inputs=0)
- *   fn_index=8:  preprocess_image (inputs=[image])
- *   fn_index=11: generate_and_extract_glb (11 inputs, 4 outputs)
+ * API: gen_shape (fn_index=1)
+ * Inputs (8): [image, inference_steps, guidance_scale, seed, octree_res, num_chunks, target_faces, randomize_seed]
+ * Outputs (4): [html_viewer, download_button(OBJ), glb_path, obj_path]
  *
- * generate_and_extract_glb inputs (11 total):
- *   [0] image (comp 6) - preprocessed image
- *   [1] gallery (comp 8) - multi-image gallery (empty for single)
- *   [2] state (comp 39) - session state (null)
- *   [3] seed slider (comp 11) - seed (0 = random)
- *   [4] guidance_strength slider (comp 15) - default 7.5
- *   [5] sampling_steps slider (comp 16) - default 12
- *   [6] slat_guidance slider (comp 20) - default 3.0
- *   [7] slat_sampling slider (comp 21) - default 12
- *   [8] multi_image_mode radio (comp 23) - "stochastic"
- *   [9] simplify slider (comp 27) - default 0.95
- *   [10] texture_size slider (comp 28) - default 1024
- *
- * Outputs: [state, video, litmodel3d(GLB), downloadbutton(GLB file)]
+ * Fallback: TRELLIS community space (if primary is unavailable)
  */
 
-const HF_SPACE_URL = "https://trellis-community-trellis.hf.space";
-const GRADIO_API = `${HF_SPACE_URL}/gradio_api`;
+// Primary space (frogleo/Image-to-3D - Gradio 4.x, no prefix needed)
+const PRIMARY_SPACE_URL = "https://frogleo-image-to-3d.hf.space";
 
-interface GradioUploadResponse {
-  path: string;
-  url: string;
-  size: number;
-  orig_name: string;
-  mime_type: string;
-}
-
-interface GradioApiResponse {
-  data: any[];
-  is_generating: boolean;
-  duration: number;
-  average_duration: number;
-}
+// Fallback space (TRELLIS - Gradio 5.x, needs /gradio_api/ prefix)
+const FALLBACK_SPACE_URL = "https://trellis-community-trellis.hf.space";
+const FALLBACK_API = `${FALLBACK_SPACE_URL}/gradio_api`;
 
 /**
- * Upload a file to the Gradio space via /gradio_api/upload
+ * Upload a file to a Gradio space
  */
-async function uploadToGradio(
+async function uploadToSpace(
+  spaceUrl: string,
   imageBuffer: Buffer,
-  filename: string
+  filename: string,
+  useGradioApiPrefix: boolean = false
 ): Promise<string[]> {
+  const uploadUrl = useGradioApiPrefix
+    ? `${spaceUrl}/gradio_api/upload`
+    : `${spaceUrl}/upload`;
+
   const formData = new FormData();
   const blob = new Blob([new Uint8Array(imageBuffer)], { type: "image/png" });
   formData.append("files", blob, filename);
 
-  const response = await fetch(`${GRADIO_API}/upload`, {
+  const response = await fetch(uploadUrl, {
     method: "POST",
     body: formData,
   });
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`Failed to upload to Gradio: ${response.status} ${text}`);
+    throw new Error(`Upload failed: ${response.status} ${text}`);
   }
 
-  // The upload endpoint returns an array of file paths (strings)
-  const paths: string[] = await response.json();
-  return paths;
+  return await response.json();
 }
 
 /**
- * Call a Gradio API endpoint via queue/join and wait for the result via SSE queue/data
+ * Submit a job to a Gradio queue and wait for the result via SSE
  */
-async function callGradioApi(
+async function submitAndWait(
+  spaceUrl: string,
   fnIndex: number,
   data: any[],
   sessionHash: string,
+  timeoutMs: number = 5 * 60 * 1000,
+  useGradioApiPrefix: boolean = false,
   onProgress?: (message: string) => void
-): Promise<GradioApiResponse> {
-  // Join the queue via /gradio_api/queue/join
-  const joinResponse = await fetch(`${GRADIO_API}/queue/join`, {
+): Promise<any> {
+  const baseUrl = useGradioApiPrefix ? `${spaceUrl}/gradio_api` : spaceUrl;
+
+  // Join queue
+  const joinResponse = await fetch(`${baseUrl}/queue/join`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -99,27 +79,25 @@ async function callGradioApi(
 
   if (!joinResponse.ok) {
     const text = await joinResponse.text();
-    throw new Error(`Failed to join queue: ${joinResponse.status} ${text}`);
+    throw new Error(`Queue join failed: ${joinResponse.status} ${text}`);
   }
 
-  const joinResult = await joinResponse.json();
-  const eventId = joinResult.event_id;
+  const { event_id: eventId } = await joinResponse.json();
+  console.log(`[Reconstruction] Queued fn_index=${fnIndex}, event_id=${eventId}`);
 
-  // Stream results via SSE from /gradio_api/queue/data
+  // Listen for result via SSE
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      reject(new Error("Reconstruction timed out after 8 minutes"));
-    }, 8 * 60 * 1000);
+    const timer = setTimeout(() => {
+      reject(new Error(`Timeout after ${timeoutMs / 1000}s`));
+    }, timeoutMs);
 
-    const eventSource = `${GRADIO_API}/queue/data?session_hash=${sessionHash}`;
-
-    fetch(eventSource, {
+    fetch(`${baseUrl}/queue/data?session_hash=${sessionHash}`, {
       method: "GET",
       headers: { Accept: "text/event-stream" },
     })
       .then(async (response) => {
         if (!response.ok || !response.body) {
-          clearTimeout(timeout);
+          clearTimeout(timer);
           reject(new Error(`SSE connection failed: ${response.status}`));
           return;
         }
@@ -138,90 +116,90 @@ async function callGradioApi(
             buffer = lines.pop() || "";
 
             for (const line of lines) {
-              if (line.startsWith("data: ")) {
-                try {
-                  const eventData = JSON.parse(line.slice(6));
+              if (!line.startsWith("data: ")) continue;
 
-                  if (eventData.event_id !== eventId) continue;
+              let eventData: any;
+              try {
+                eventData = JSON.parse(line.slice(6));
+              } catch {
+                continue;
+              }
 
-                  if (eventData.msg === "process_completed") {
-                    clearTimeout(timeout);
-                    reader.cancel();
-                    if (eventData.success === false || eventData.output?.error) {
-                      reject(
-                        new Error(
-                          eventData.output?.error || "Processing failed on server"
-                        )
-                      );
-                    } else {
-                      resolve(eventData.output as GradioApiResponse);
-                    }
-                    return;
+              if (eventData.event_id !== eventId) continue;
+
+              switch (eventData.msg) {
+                case "process_completed":
+                  clearTimeout(timer);
+                  reader.cancel().catch(() => {});
+
+                  if (eventData.success === false) {
+                    reject(new Error(eventData.output?.error || "Processing failed"));
+                  } else {
+                    resolve(eventData.output);
                   }
+                  return;
 
-                  if (eventData.msg === "process_starts") {
-                    console.log("[Reconstruction] Processing started...");
-                    onProgress?.("Processing started...");
-                  }
+                case "process_starts":
+                  console.log(`[Reconstruction] Processing started`);
+                  onProgress?.("Generating 3D model...");
+                  break;
 
-                  if (eventData.msg === "estimation") {
-                    console.log(
-                      `[Reconstruction] Queue position: ${eventData.rank}, ETA: ${eventData.rank_eta}s`
-                    );
-                    onProgress?.(
-                      `Queue position: ${eventData.rank + 1}, ETA: ${Math.ceil(eventData.rank_eta || 0)}s`
-                    );
-                  }
-
-                  if (eventData.msg === "close_stream") {
-                    // Stream closed without process_completed for our event
-                    // This can happen if the event was already completed
-                    break;
-                  }
-                } catch {
-                  // Skip malformed JSON lines
-                }
+                case "estimation":
+                  const eta = Math.ceil(eventData.rank_eta || 0);
+                  console.log(`[Reconstruction] Queue rank=${eventData.rank}, eta=${eta}s`);
+                  onProgress?.(`In queue (position ${(eventData.rank || 0) + 1}, ~${eta}s remaining)`);
+                  break;
               }
             }
           }
-          // If we exit the loop without resolving, it means stream ended
-          clearTimeout(timeout);
-          reject(new Error("SSE stream ended without receiving result"));
+
+          clearTimeout(timer);
+          reject(new Error("SSE stream ended without result"));
         } catch (e) {
-          clearTimeout(timeout);
+          clearTimeout(timer);
           reject(e);
         }
       })
       .catch((e) => {
-        clearTimeout(timeout);
+        clearTimeout(timer);
         reject(e);
       });
   });
 }
 
 /**
- * Download a file from the Gradio space
+ * Download a file from a Gradio space
  */
-async function downloadFromGradio(filePath: string): Promise<Buffer> {
-  // If it's already a full URL, use it directly
+async function downloadFile(spaceUrl: string, filePath: string): Promise<Buffer> {
   let url: string;
   if (filePath.startsWith("http")) {
     url = filePath;
-  } else if (filePath.startsWith("/")) {
-    // Absolute path from the space filesystem
-    url = `${HF_SPACE_URL}/file=${filePath}`;
+  } else if (filePath.startsWith("/static/")) {
+    // Static files are served directly at the path
+    url = `${spaceUrl}${filePath}`;
+  } else if (filePath.startsWith("/tmp/") || filePath.startsWith("/")) {
+    // Temp files need the /file= prefix
+    url = `${spaceUrl}/file=${filePath}`;
   } else {
-    // Relative path or other format
-    url = `${HF_SPACE_URL}/file=${filePath}`;
+    url = `${spaceUrl}/${filePath}`;
   }
 
+  console.log(`[Reconstruction] Downloading from: ${url}`);
   const response = await fetch(url);
   if (!response.ok) {
-    throw new Error(`Failed to download file: ${response.status}`);
+    // Try alternative URL format
+    const altUrl = filePath.startsWith("/")
+      ? `${spaceUrl}${filePath}`
+      : `${spaceUrl}/file=${filePath}`;
+    console.log(`[Reconstruction] Retrying with: ${altUrl}`);
+    const altResponse = await fetch(altUrl);
+    if (!altResponse.ok) {
+      throw new Error(`Download failed: ${response.status} from ${url}, alt: ${altResponse.status}`);
+    }
+    return Buffer.from(await altResponse.arrayBuffer());
   }
 
-  const arrayBuffer = await response.arrayBuffer();
-  return Buffer.from(arrayBuffer);
+  return Buffer.from(await response.arrayBuffer());
 }
 
 export interface ReconstructionResult {
@@ -230,190 +208,98 @@ export interface ReconstructionResult {
 }
 
 /**
- * Find a GLB file reference in the Gradio response data.
- * The output format varies; we check multiple patterns.
+ * Primary reconstruction using frogleo/Image-to-3D space.
+ * Simple single-call API with no session management needed.
  */
-function findGlbInResponse(data: any[]): string | null {
-  for (const item of data) {
-    if (!item) continue;
-
-    // Direct file reference with .glb path
-    if (typeof item === "object") {
-      // Check top-level path/url
-      for (const key of ["path", "url", "name"]) {
-        const val = item[key];
-        if (typeof val === "string" && val.includes(".glb")) return val;
-      }
-
-      // Check value.path / value.url (nested format)
-      if (item.value && typeof item.value === "object") {
-        for (const key of ["path", "url", "name"]) {
-          const val = item.value[key];
-          if (typeof val === "string" && val.includes(".glb")) return val;
-        }
-      }
-
-      // Check orig_name
-      if (
-        item.orig_name &&
-        typeof item.orig_name === "string" &&
-        item.orig_name.includes(".glb")
-      ) {
-        return item.path || item.url || null;
-      }
-    }
-
-    // Direct URL string
-    if (typeof item === "string" && item.includes(".glb")) return item;
-  }
-
-  return null;
-}
-
-/**
- * Main reconstruction function.
- * Takes an image buffer and returns a GLB model buffer.
- */
-export async function reconstructImage(
+async function reconstructWithPrimary(
   imageBuffer: Buffer,
   filename: string,
   onProgress?: (progress: number, message: string) => void
 ): Promise<ReconstructionResult> {
-  const sessionHash = Math.random().toString(36).substring(2, 15);
+  const sessionHash = `primary_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
 
-  onProgress?.(5, "Uploading image to reconstruction service...");
+  onProgress?.(10, "Uploading image...");
 
-  // Step 1: Upload the image via /gradio_api/upload
-  const uploadedPaths = await uploadToGradio(imageBuffer, filename);
-  if (!uploadedPaths || uploadedPaths.length === 0) {
-    throw new Error("Failed to upload image");
-  }
+  // Upload image
+  const paths = await uploadToSpace(PRIMARY_SPACE_URL, imageBuffer, filename, false);
+  if (!paths || paths.length === 0) throw new Error("Upload failed");
+  const filePath = paths[0];
+  console.log("[Reconstruction] Primary: uploaded to", filePath);
 
-  const uploadedPath = uploadedPaths[0];
-  console.log("[Reconstruction] Image uploaded:", uploadedPath);
+  onProgress?.(20, "Starting 3D reconstruction...");
 
-  onProgress?.(10, "Starting reconstruction session...");
-
-  // Step 2: Start a session (fn_index=4)
-  try {
-    await callGradioApi(4, [], sessionHash);
-    console.log("[Reconstruction] Session started");
-  } catch (e) {
-    console.log(
-      "[Reconstruction] Session start note:",
-      (e as Error).message
-    );
-    // Non-fatal — some spaces don't require explicit session start
-  }
-
-  onProgress?.(15, "Preprocessing image...");
-
-  // Step 3: Preprocess the image (fn_index=8)
-  // Build the file reference in Gradio's expected format
+  // Build image reference
   const imageRef = {
-    path: uploadedPath,
-    url: `${HF_SPACE_URL}/file=${uploadedPath}`,
+    path: filePath,
+    url: `${PRIMARY_SPACE_URL}/file=${filePath}`,
     orig_name: filename,
     size: imageBuffer.length,
     mime_type: "image/png",
     meta: { _type: "gradio.FileData" },
   };
 
-  // Use a new session hash for each API call to avoid SSE stream conflicts
-  const sessionHash2 = Math.random().toString(36).substring(2, 15);
-  let preprocessedImage: any = imageRef;
-  try {
-    const preprocessResult = await callGradioApi(8, [imageRef], sessionHash2);
-    if (preprocessResult.data && preprocessResult.data[0]) {
-      preprocessedImage = preprocessResult.data[0];
-      console.log("[Reconstruction] Image preprocessed successfully");
-    }
-  } catch (e) {
-    console.log(
-      "[Reconstruction] Preprocess note (using raw image):",
-      (e as Error).message
-    );
-    // If preprocessing fails, try using the raw uploaded image reference
-  }
-
-  onProgress?.(20, "Generating 3D model (this may take 1-3 minutes)...");
-
-  // Step 4: Generate and extract GLB (fn_index=11)
-  // Use a fresh session hash for the main generation call
-  const sessionHash3 = Math.random().toString(36).substring(2, 15);
-
-  // 11 inputs matching the component order from config
-  const generationResult = await callGradioApi(
-    11,
-    [
-      preprocessedImage, // [0] image (comp 6)
-      [],                // [1] gallery (comp 8) - empty for single image
-      null,              // [2] state (comp 39) - session state
-      0,                 // [3] seed (comp 11) - 0 = random
-      7.5,               // [4] guidance_strength (comp 15)
-      12,                // [5] sampling_steps (comp 16)
-      3.0,               // [6] slat_guidance (comp 20)
-      12,                // [7] slat_sampling (comp 21)
-      "stochastic",      // [8] multi_image_mode (comp 23)
-      0.95,              // [9] simplify (comp 27)
-      1024,              // [10] texture_size (comp 28)
-    ],
-    sessionHash3,
-    (msg) => onProgress?.(30, msg)
+  // Call gen_shape (fn_index=1)
+  // Inputs: [image, inference_steps, guidance_scale, seed, octree_res, num_chunks, target_faces, randomize_seed]
+  const result = await submitAndWait(
+    PRIMARY_SPACE_URL,
+    1,
+    [imageRef, 5, 5.5, 1234, 256, 8000, 10000, true],
+    sessionHash,
+    3 * 60 * 1000, // 3 minute timeout
+    false,
+    (msg) => onProgress?.(40, msg)
   );
 
   onProgress?.(80, "Downloading 3D model...");
 
-  console.log(
-    "[Reconstruction] Generation completed. Output data keys:",
-    generationResult.data?.map((d: any) =>
-      d === null
-        ? "null"
-        : typeof d === "object"
-        ? JSON.stringify(Object.keys(d)).substring(0, 100)
-        : typeof d
-    )
-  );
+  const outputData = result?.data || [];
+  console.log("[Reconstruction] Primary: generation complete, outputs:", outputData.length);
 
-  // Step 5: Find and download the GLB file from the result
-  const glbPath = findGlbInResponse(generationResult.data || []);
+  // Output[2] is the GLB path (string like "/static/.../white_mesh.glb")
+  let glbPath: string | null = null;
 
-  let glbBuffer: Buffer | null = null;
+  // Check output[2] first (GLB path)
+  if (outputData[2] && typeof outputData[2] === "string" && outputData[2].includes(".glb")) {
+    glbPath = outputData[2];
+  }
 
-  if (glbPath) {
-    console.log("[Reconstruction] Found GLB at:", glbPath);
-    glbBuffer = await downloadFromGradio(glbPath);
-  } else {
-    // Fallback: try each output item that looks like a file
-    console.log("[Reconstruction] No direct GLB path found, trying fallback...");
-    for (const item of generationResult.data || []) {
-      if (!item || typeof item !== "object") continue;
-      const path = item.path || item.url;
-      if (path && typeof path === "string") {
-        try {
-          const buf = await downloadFromGradio(path);
-          // Check if it starts with glTF magic bytes (0x46546C67 = "glTF")
-          if (buf.length > 4 && buf.readUInt32LE(0) === 0x46546c67) {
-            glbBuffer = buf;
-            console.log("[Reconstruction] Found GLB via magic bytes at:", path);
-            break;
-          }
-        } catch {
-          continue;
+  // Fallback: check output[1] (download button with OBJ, but may have GLB)
+  if (!glbPath && outputData[1] && typeof outputData[1] === "object") {
+    const val = outputData[1].value || outputData[1];
+    const path = val.path || val.url;
+    if (path && typeof path === "string") {
+      // This is the OBJ, but let's check if there's a GLB variant
+      glbPath = path.replace(".obj", ".glb");
+    }
+  }
+
+  // Try to find GLB in any output
+  if (!glbPath) {
+    for (const item of outputData) {
+      if (typeof item === "string" && item.includes(".glb")) {
+        glbPath = item;
+        break;
+      }
+      if (item && typeof item === "object") {
+        const p = item.path || item.url || (item.value && (item.value.path || item.value.url));
+        if (p && typeof p === "string" && p.includes(".glb")) {
+          glbPath = p;
+          break;
         }
       }
     }
   }
 
+  if (!glbPath) {
+    console.error("[Reconstruction] Primary: no GLB found in outputs:", JSON.stringify(outputData).substring(0, 500));
+    throw new Error("No GLB file found in reconstruction output");
+  }
+
+  console.log("[Reconstruction] Primary: downloading GLB from", glbPath);
+  const glbBuffer = await downloadFile(PRIMARY_SPACE_URL, glbPath);
+
   if (!glbBuffer || glbBuffer.length === 0) {
-    // Log the full response for debugging
-    console.error(
-      "[Reconstruction] Full response data:",
-      JSON.stringify(generationResult.data, null, 2).substring(0, 2000)
-    );
-    throw new Error(
-      "Failed to extract GLB model from reconstruction result. The service may have returned an unexpected format."
-    );
+    throw new Error("Downloaded GLB file is empty");
   }
 
   onProgress?.(100, "3D model ready!");
@@ -422,4 +308,160 @@ export async function reconstructImage(
     glbBuffer,
     filename: `model_${Date.now()}.glb`,
   };
+}
+
+/**
+ * Fallback reconstruction using TRELLIS community space.
+ * Requires session management (start_session → preprocess → generate).
+ */
+async function reconstructWithFallback(
+  imageBuffer: Buffer,
+  filename: string,
+  onProgress?: (progress: number, message: string) => void
+): Promise<ReconstructionResult> {
+  const sessionHash = `trellis_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+
+  onProgress?.(10, "Uploading image (fallback)...");
+
+  // Upload
+  const paths = await uploadToSpace(FALLBACK_SPACE_URL, imageBuffer, filename, true);
+  if (!paths || paths.length === 0) throw new Error("Upload failed");
+  const filePath = paths[0];
+
+  onProgress?.(15, "Initializing GPU session...");
+
+  // Start session
+  await submitAndWait(FALLBACK_SPACE_URL, 4, [], sessionHash, 30_000, true);
+
+  onProgress?.(20, "Preprocessing image...");
+
+  // Preprocess
+  const imageRef = {
+    path: filePath,
+    url: `${FALLBACK_SPACE_URL}/file=${filePath}`,
+    orig_name: filename,
+    size: imageBuffer.length,
+    mime_type: "image/png",
+    meta: { _type: "gradio.FileData" },
+  };
+
+  const preprocessResult = await submitAndWait(FALLBACK_SPACE_URL, 8, [imageRef], sessionHash, 60_000, true);
+  const preprocessedImage = preprocessResult?.data?.[0] || imageRef;
+
+  onProgress?.(30, "Generating 3D model (1-3 minutes)...");
+
+  // Generate
+  const genResult = await submitAndWait(
+    FALLBACK_SPACE_URL,
+    11,
+    [preprocessedImage, [], null, 0, 7.5, 12, 3.0, 12, "stochastic", 0.95, 1024],
+    sessionHash,
+    5 * 60 * 1000,
+    true,
+    (msg) => onProgress?.(50, msg)
+  );
+
+  onProgress?.(85, "Downloading 3D model...");
+
+  const outputData = genResult?.data || [];
+
+  // Find GLB in outputs
+  let glbPath: string | null = null;
+  for (const item of outputData) {
+    if (!item) continue;
+    if (typeof item === "string" && item.includes(".glb")) {
+      glbPath = item;
+      break;
+    }
+    if (typeof item === "object") {
+      const p = item.path || item.url || (item.value && (item.value.path || item.value.url));
+      if (p && typeof p === "string" && p.includes(".glb")) {
+        glbPath = p;
+        break;
+      }
+    }
+  }
+
+  if (!glbPath) {
+    // Try downloading each file output and checking for GLB magic bytes
+    for (const item of outputData) {
+      if (!item || typeof item !== "object") continue;
+      const path = item.path || item.url;
+      if (!path || typeof path !== "string") continue;
+      try {
+        const buf = await downloadFile(FALLBACK_SPACE_URL, path);
+        if (buf.length > 4 && buf.readUInt32LE(0) === 0x46546c67) {
+          return { glbBuffer: buf, filename: `model_${Date.now()}.glb` };
+        }
+      } catch {
+        continue;
+      }
+    }
+    throw new Error("No GLB file found in TRELLIS output");
+  }
+
+  const glbBuffer = await downloadFile(FALLBACK_SPACE_URL, glbPath);
+  if (!glbBuffer || glbBuffer.length === 0) throw new Error("Downloaded GLB is empty");
+
+  onProgress?.(100, "3D model ready!");
+  return { glbBuffer, filename: `model_${Date.now()}.glb` };
+}
+
+/**
+ * Main reconstruction function with automatic fallback.
+ */
+export async function reconstructImage(
+  imageBuffer: Buffer,
+  filename: string,
+  onProgress?: (progress: number, message: string) => void
+): Promise<ReconstructionResult> {
+  // Try primary space first
+  try {
+    onProgress?.(5, "Connecting to reconstruction service...");
+    return await reconstructWithPrimary(imageBuffer, filename, onProgress);
+  } catch (primaryError) {
+    const errorMsg = (primaryError as Error).message;
+    console.error("[Reconstruction] Primary failed:", errorMsg);
+
+    // If it's a quota error or service unavailable, try fallback
+    if (
+      errorMsg.includes("GPU quota") ||
+      errorMsg.includes("503") ||
+      errorMsg.includes("502") ||
+      errorMsg.includes("timeout") ||
+      errorMsg.includes("SSE") ||
+      errorMsg.includes("Upload failed")
+    ) {
+      console.log("[Reconstruction] Trying fallback (TRELLIS)...");
+      onProgress?.(5, "Primary service busy, trying alternative...");
+
+      try {
+        return await reconstructWithFallback(imageBuffer, filename, onProgress);
+      } catch (fallbackError) {
+        const fbMsg = (fallbackError as Error).message;
+        console.error("[Reconstruction] Fallback also failed:", fbMsg);
+
+        // Provide a user-friendly error message
+        if (fbMsg.includes("GPU quota")) {
+          throw new Error(
+            "Both reconstruction services have exceeded their GPU quota. " +
+            "This is a limitation of free HuggingFace Spaces. Please try again in a few hours."
+          );
+        }
+        throw new Error(
+          `Reconstruction failed on both services. Primary: ${errorMsg}. Fallback: ${fbMsg}`
+        );
+      }
+    }
+
+    // For other errors, provide helpful message
+    if (errorMsg.includes("GPU quota")) {
+      throw new Error(
+        "The reconstruction service has exceeded its GPU quota. " +
+        "This is a limitation of free HuggingFace Spaces. Please try again in a few hours."
+      );
+    }
+
+    throw primaryError;
+  }
 }

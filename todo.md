@@ -15,3 +15,4 @@
 - [x] Loading states and error handling
 - [x] Vitest tests for backend API
 - [x] Fix Gradio API 404 error when uploading image to TRELLIS space
+- [x] Fix FileNotFoundError during 3D reconstruction processing
