@@ -1,36 +1,104 @@
 import { Canvas } from "@react-three/fiber";
-import { OrbitControls, Environment, useGLTF, Center, ContactShadows } from "@react-three/drei";
-import { Suspense, useEffect, useRef, useState } from "react";
-import { Loader2, Download } from "lucide-react";
+import { OrbitControls, Center, ContactShadows } from "@react-three/drei";
+import { Suspense, useEffect, useRef, useState, Component, type ReactNode } from "react";
+import { Loader2, Download, AlertCircle, RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import * as THREE from "three";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+
+/**
+ * Local error boundary specifically for the 3D Canvas.
+ * Prevents Canvas crashes (WebGL context lost, HDR load failures, etc.)
+ * from taking down the entire page.
+ */
+interface CanvasErrorBoundaryProps {
+  children: ReactNode;
+  fallback?: ReactNode;
+}
+
+interface CanvasErrorBoundaryState {
+  hasError: boolean;
+  error: Error | null;
+}
+
+class CanvasErrorBoundary extends Component<CanvasErrorBoundaryProps, CanvasErrorBoundaryState> {
+  constructor(props: CanvasErrorBoundaryProps) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error): CanvasErrorBoundaryState {
+    return { hasError: true, error };
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        this.props.fallback || (
+          <div className="w-full h-full flex flex-col items-center justify-center gap-4 p-8">
+            <AlertCircle className="w-10 h-10 text-destructive/60" />
+            <p className="text-sm text-muted-foreground text-center">
+              3D viewer encountered an error.
+            </p>
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-2 bg-transparent"
+              onClick={() => {
+                this.setState({ hasError: false, error: null });
+              }}
+            >
+              <RotateCcw className="w-4 h-4" />
+              Retry
+            </Button>
+          </div>
+        )
+      );
+    }
+    return this.props.children;
+  }
+}
 
 function Model({ url }: { url: string }) {
-  const { scene } = useGLTF(url);
-  const ref = useRef<THREE.Group>(null);
+  const groupRef = useRef<THREE.Group>(null);
+  const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
-    if (ref.current) {
-      // Auto-scale the model to fit the viewport
-      const box = new THREE.Box3().setFromObject(ref.current);
-      const size = box.getSize(new THREE.Vector3());
-      const maxDim = Math.max(size.x, size.y, size.z);
-      const scale = 2 / maxDim;
-      ref.current.scale.setScalar(scale);
+    const loader = new GLTFLoader();
+    loader.load(
+      url,
+      (gltf) => {
+        const group = groupRef.current;
+        if (!group) return;
 
-      // Center the model
-      const center = box.getCenter(new THREE.Vector3());
-      ref.current.position.sub(center.multiplyScalar(scale));
+        // Clear previous children
+        while (group.children.length > 0) {
+          group.remove(group.children[0]);
+        }
 
-      // Ensure textures render correctly
-      scene.traverse((child) => {
-        if (child instanceof THREE.Mesh) {
-          // Enable double-sided rendering for all meshes
-          if (child.material) {
+        const model = gltf.scene;
+        group.add(model);
+
+        // Auto-scale the model to fit the viewport
+        const box = new THREE.Box3().setFromObject(model);
+        const size = box.getSize(new THREE.Vector3());
+        const maxDim = Math.max(size.x, size.y, size.z);
+        if (maxDim > 0) {
+          const scale = 2 / maxDim;
+          model.scale.setScalar(scale);
+
+          // Recalculate bounding box after scaling
+          const scaledBox = new THREE.Box3().setFromObject(model);
+          const center = scaledBox.getCenter(new THREE.Vector3());
+          model.position.sub(center);
+        }
+
+        // Ensure textures render correctly
+        model.traverse((child) => {
+          if (child instanceof THREE.Mesh && child.material) {
             const materials = Array.isArray(child.material) ? child.material : [child.material];
             materials.forEach((mat) => {
               mat.side = THREE.DoubleSide;
-              // If the model has a texture, ensure it's properly configured
               if (mat.map) {
                 mat.map.colorSpace = THREE.SRGBColorSpace;
                 mat.map.needsUpdate = true;
@@ -38,16 +106,22 @@ function Model({ url }: { url: string }) {
               mat.needsUpdate = true;
             });
           }
-        }
-      });
-    }
-  }, [scene]);
+        });
 
-  return (
-    <group ref={ref}>
-      <primitive object={scene} />
-    </group>
-  );
+        setLoaded(true);
+      },
+      undefined,
+      (error) => {
+        console.error("Failed to load GLB model:", error);
+      }
+    );
+
+    return () => {
+      setLoaded(false);
+    };
+  }, [url]);
+
+  return <group ref={groupRef} />;
 }
 
 function LoadingFallback() {
@@ -56,6 +130,34 @@ function LoadingFallback() {
       <boxGeometry args={[1, 1, 1]} />
       <meshStandardMaterial color="#8B5CF6" wireframe />
     </mesh>
+  );
+}
+
+/**
+ * A simple hemisphere + directional light setup that doesn't require
+ * any external HDR files. Works reliably on all devices including mobile.
+ */
+function SceneLighting() {
+  return (
+    <>
+      {/* Hemisphere light for ambient fill - sky blue from above, ground color from below */}
+      <hemisphereLight
+        args={["#b1c5ff", "#3d2b1f", 0.6]}
+      />
+      {/* Key light */}
+      <directionalLight
+        position={[5, 8, 5]}
+        intensity={1.5}
+        castShadow
+        shadow-mapSize={[1024, 1024]}
+      />
+      {/* Fill light */}
+      <directionalLight position={[-5, 5, -3]} intensity={0.6} />
+      {/* Back/rim light */}
+      <directionalLight position={[0, -3, 5]} intensity={0.3} />
+      {/* Accent light for visual interest */}
+      <pointLight position={[-3, 2, -5]} intensity={0.5} color="#a78bfa" />
+    </>
   );
 }
 
@@ -84,55 +186,51 @@ export default function ModelViewer({ modelUrl, onDownload, className = "" }: Mo
           </div>
         )}
 
-        <Canvas
-          camera={{ position: [3, 2, 5], fov: 45 }}
-          onCreated={({ gl }) => {
-            gl.outputColorSpace = THREE.SRGBColorSpace;
-            gl.toneMapping = THREE.ACESFilmicToneMapping;
-            gl.toneMappingExposure = 1.2;
-            setIsLoading(false);
-          }}
-          gl={{ antialias: true }}
-          style={{ background: "transparent" }}
-        >
-          {/* Lighting setup optimized for textured models */}
-          <ambientLight intensity={0.6} />
-          <directionalLight
-            position={[5, 8, 5]}
-            intensity={1.2}
-            castShadow
-            shadow-mapSize={[1024, 1024]}
-          />
-          <directionalLight position={[-5, 5, -3]} intensity={0.5} />
-          <directionalLight position={[0, -3, 5]} intensity={0.2} />
-          {/* Subtle rim light for depth */}
-          <pointLight position={[-3, 2, -5]} intensity={0.4} color="#a78bfa" />
+        <CanvasErrorBoundary>
+          <Canvas
+            camera={{ position: [3, 2, 5], fov: 45 }}
+            onCreated={({ gl }) => {
+              gl.outputColorSpace = THREE.SRGBColorSpace;
+              gl.toneMapping = THREE.ACESFilmicToneMapping;
+              gl.toneMappingExposure = 1.2;
+              setIsLoading(false);
+            }}
+            gl={{
+              antialias: true,
+              // Improve mobile compatibility
+              powerPreference: "default",
+              failIfMajorPerformanceCaveat: false,
+            }}
+            style={{ background: "transparent" }}
+          >
+            {/* Pure code-based lighting - no external HDR files needed */}
+            <SceneLighting />
 
-          <Suspense fallback={<LoadingFallback />}>
-            <Center>
-              <Model url={modelUrl} />
-            </Center>
-            <ContactShadows
-              position={[0, -1.5, 0]}
-              opacity={0.4}
-              scale={10}
-              blur={2}
-              far={4}
-              color="#8B5CF6"
+            <Suspense fallback={<LoadingFallback />}>
+              <Center>
+                <Model url={modelUrl} />
+              </Center>
+              <ContactShadows
+                position={[0, -1.5, 0]}
+                opacity={0.4}
+                scale={10}
+                blur={2}
+                far={4}
+                color="#8B5CF6"
+              />
+            </Suspense>
+
+            <OrbitControls
+              enablePan
+              enableZoom
+              enableRotate
+              autoRotate
+              autoRotateSpeed={1}
+              minDistance={1}
+              maxDistance={20}
             />
-            <Environment preset="studio" environmentIntensity={0.4} />
-          </Suspense>
-
-          <OrbitControls
-            enablePan
-            enableZoom
-            enableRotate
-            autoRotate
-            autoRotateSpeed={1}
-            minDistance={1}
-            maxDistance={20}
-          />
-        </Canvas>
+          </Canvas>
+        </CanvasErrorBoundary>
       </div>
 
       {/* Controls overlay */}
