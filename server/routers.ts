@@ -113,7 +113,7 @@ export const appRouter = router({
                   result.glbBuffer,
                   imageBuffers[0].buffer,
                   "image/png",
-                  isMulti ? "front" : "spherical"
+                  "triplanar"
                 );
                 console.log(`[Job ${jobId}] Texture applied successfully (${finalGlb.length} bytes)`);
               } catch (texError) {

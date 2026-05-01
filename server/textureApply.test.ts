@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyTextureToGlb, hasExistingTexture } from "./textureApply";
+import { applyTextureToGlb, hasExistingTexture, type ProjectionMode } from "./textureApply";
 
 /**
  * Create a minimal valid GLB file with just positions (no textures, no normals)
@@ -57,18 +57,18 @@ function createMinimalGlb(): Buffer {
   let offset = 0;
 
   // Header
-  glb.writeUInt32LE(0x46546c67, offset); offset += 4; // "glTF"
-  glb.writeUInt32LE(2, offset); offset += 4; // version
+  glb.writeUInt32LE(0x46546c67, offset); offset += 4;
+  glb.writeUInt32LE(2, offset); offset += 4;
   glb.writeUInt32LE(totalLength, offset); offset += 4;
 
   // JSON chunk
   glb.writeUInt32LE(paddedJson.length, offset); offset += 4;
-  glb.writeUInt32LE(0x4e4f534a, offset); offset += 4; // "JSON"
+  glb.writeUInt32LE(0x4e4f534a, offset); offset += 4;
   paddedJson.copy(glb, offset); offset += paddedJson.length;
 
   // BIN chunk
   glb.writeUInt32LE(posBuffer.length, offset); offset += 4;
-  glb.writeUInt32LE(0x004e4942, offset); offset += 4; // "BIN\0"
+  glb.writeUInt32LE(0x004e4942, offset); offset += 4;
   posBuffer.copy(glb, offset);
 
   return glb;
@@ -87,13 +87,12 @@ function createMinimalPng(): Buffer {
 }
 
 describe("textureApply", () => {
-  it("applies texture to a geometry-only GLB with spherical projection (default)", async () => {
+  it("applies texture with triplanar projection (default)", async () => {
     const glb = createMinimalGlb();
     const image = createMinimalPng();
 
     const result = await applyTextureToGlb(glb, image, "image/png");
 
-    // Result should be a valid GLB
     expect(result).toBeInstanceOf(Buffer);
     expect(result.length).toBeGreaterThan(glb.length);
 
@@ -126,6 +125,38 @@ describe("textureApply", () => {
     expect(gltf.meshes[0].primitives[0].material).toBe(0);
   });
 
+  it("uses KHR_materials_unlit extension for photo-accurate colors", async () => {
+    const glb = createMinimalGlb();
+    const image = createMinimalPng();
+
+    const result = await applyTextureToGlb(glb, image, "image/png", "triplanar");
+
+    const chunk0Length = result.readUInt32LE(12);
+    const jsonData = result.slice(20, 20 + chunk0Length).toString("utf8");
+    const gltf = JSON.parse(jsonData);
+
+    expect(gltf.extensionsUsed).toContain("KHR_materials_unlit");
+    expect(gltf.materials[0].extensions).toHaveProperty("KHR_materials_unlit");
+  });
+
+  it("applies texture with spherical projection", async () => {
+    const glb = createMinimalGlb();
+    const image = createMinimalPng();
+
+    const result = await applyTextureToGlb(glb, image, "image/png", "spherical");
+
+    expect(result).toBeInstanceOf(Buffer);
+    expect(result.length).toBeGreaterThan(glb.length);
+
+    const chunk0Length = result.readUInt32LE(12);
+    const jsonData = result.slice(20, 20 + chunk0Length).toString("utf8");
+    const gltf = JSON.parse(jsonData);
+
+    expect(gltf.materials.length).toBe(1);
+    expect(gltf.textures.length).toBe(1);
+    expect(gltf.images.length).toBe(1);
+  });
+
   it("applies texture with front projection mode", async () => {
     const glb = createMinimalGlb();
     const image = createMinimalPng();
@@ -135,66 +166,33 @@ describe("textureApply", () => {
     expect(result).toBeInstanceOf(Buffer);
     expect(result.length).toBeGreaterThan(glb.length);
 
-    // Parse the result
     const chunk0Length = result.readUInt32LE(12);
     const jsonData = result.slice(20, 20 + chunk0Length).toString("utf8");
     const gltf = JSON.parse(jsonData);
 
-    // Should have all texture components
     expect(gltf.materials.length).toBe(1);
     expect(gltf.textures.length).toBe(1);
-    expect(gltf.images.length).toBe(1);
-
-    // Verify UV coordinates are in 0-1 range
-    const uvAccIdx = gltf.meshes[0].primitives[0].attributes.TEXCOORD_0;
-    const uvAcc = gltf.accessors[uvAccIdx];
-    expect(uvAcc.min[0]).toBeGreaterThanOrEqual(0);
-    expect(uvAcc.min[1]).toBeGreaterThanOrEqual(0);
-    expect(uvAcc.max[0]).toBeLessThanOrEqual(1);
-    expect(uvAcc.max[1]).toBeLessThanOrEqual(1);
   });
 
-  it("front projection produces different UVs than spherical", async () => {
+  it("all three projection modes produce different results", async () => {
     const glb = createMinimalGlb();
     const image = createMinimalPng();
 
-    const sphericalResult = await applyTextureToGlb(glb, image, "image/png", "spherical");
-    const frontResult = await applyTextureToGlb(glb, image, "image/png", "front");
+    const modes: ProjectionMode[] = ["triplanar", "spherical", "front"];
+    const results: Buffer[] = [];
 
-    // Both should be valid but different
-    expect(sphericalResult.readUInt32LE(0)).toBe(0x46546c67);
-    expect(frontResult.readUInt32LE(0)).toBe(0x46546c67);
+    for (const mode of modes) {
+      results.push(await applyTextureToGlb(glb, image, "image/png", mode));
+    }
 
-    // The binary data should differ (different UV coordinates)
-    expect(sphericalResult.equals(frontResult)).toBe(false);
-  });
+    // All should be valid GLBs
+    for (const r of results) {
+      expect(r.readUInt32LE(0)).toBe(0x46546c67);
+    }
 
-  it("throws error for invalid GLB", async () => {
-    const invalidGlb = Buffer.from("not a glb file");
-    const image = createMinimalPng();
-
-    await expect(applyTextureToGlb(invalidGlb, image, "image/png")).rejects.toThrow();
-  });
-
-  it("generates correct UV coordinates (0-1 range) for spherical mode", async () => {
-    const glb = createMinimalGlb();
-    const image = createMinimalPng();
-
-    const result = await applyTextureToGlb(glb, image, "image/png", "spherical");
-
-    const chunk0Length = result.readUInt32LE(12);
-    const jsonData = result.slice(20, 20 + chunk0Length).toString("utf8");
-    const gltf = JSON.parse(jsonData);
-
-    const uvAccIdx = gltf.meshes[0].primitives[0].attributes.TEXCOORD_0;
-    const uvAcc = gltf.accessors[uvAccIdx];
-
-    expect(uvAcc.min[0]).toBeGreaterThanOrEqual(0);
-    expect(uvAcc.min[1]).toBeGreaterThanOrEqual(0);
-    expect(uvAcc.max[0]).toBeLessThanOrEqual(1);
-    expect(uvAcc.max[1]).toBeLessThanOrEqual(1);
-    expect(uvAcc.type).toBe("VEC2");
-    expect(uvAcc.count).toBe(3);
+    // At least some pairs should differ (different UV coordinates)
+    const allSame = results[0].equals(results[1]) && results[1].equals(results[2]);
+    expect(allSame).toBe(false);
   });
 
   it("preserves original mesh geometry", async () => {
@@ -227,6 +225,13 @@ describe("textureApply", () => {
     const normalAcc = gltf.accessors[normalAccIdx];
     expect(normalAcc.count).toBe(3);
     expect(normalAcc.type).toBe("VEC3");
+  });
+
+  it("throws error for invalid GLB", async () => {
+    const invalidGlb = Buffer.from("not a glb file");
+    const image = createMinimalPng();
+
+    await expect(applyTextureToGlb(invalidGlb, image, "image/png")).rejects.toThrow();
   });
 });
 

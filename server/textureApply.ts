@@ -2,23 +2,25 @@
  * Texture Application Service
  *
  * Takes a geometry-only GLB and a source image, then:
- * 1. Generates UV coordinates using the specified projection mode
+ * 1. Generates UV coordinates using triplanar projection (blends from 3 directions)
  * 2. Computes vertex normals for proper lighting
  * 3. Embeds the source image as a texture
  * 4. Outputs a fully textured GLB file
  *
- * Projection modes:
- * - "spherical": Wraps texture around the model like a sphere (good for single-image, all-around objects)
- * - "front": Projects texture from the front (good for multi-image fallback, preserves front-facing detail)
+ * Triplanar projection maps the texture from front (Z), top (Y), and side (X)
+ * directions simultaneously, blending based on face normals. This produces
+ * natural-looking textures on arbitrary mesh shapes without seam artifacts.
+ *
+ * The key insight: instead of trying to unwrap the mesh (which requires complex
+ * algorithms), we project the texture from the direction each face is most
+ * "facing" — like projecting a slide onto a surface from 3 projectors.
+ *
+ * Since GLB format only supports a single UV set per vertex, we bake the
+ * triplanar blend into the UV coordinates by choosing the dominant projection
+ * axis per-face and computing UVs from that axis's planar projection.
  */
 
-export type ProjectionMode = "spherical" | "front";
-
-interface Vec3 {
-  x: number;
-  y: number;
-  z: number;
-}
+export type ProjectionMode = "triplanar" | "spherical" | "front";
 
 /**
  * Check if a GLB file already has textures/materials embedded.
@@ -27,7 +29,6 @@ interface Vec3 {
 export function hasExistingTexture(glbBuffer: Buffer): boolean {
   try {
     const { gltf } = parseGlb(glbBuffer);
-    // Check if the model already has materials with textures
     if (gltf.materials && gltf.materials.length > 0) {
       for (const mat of gltf.materials) {
         if (mat.pbrMetallicRoughness?.baseColorTexture) return true;
@@ -35,7 +36,6 @@ export function hasExistingTexture(glbBuffer: Buffer): boolean {
         if (mat.normalTexture) return true;
       }
     }
-    // Also check if there are images embedded
     if (gltf.images && gltf.images.length > 0) return true;
     if (gltf.textures && gltf.textures.length > 0) return true;
     return false;
@@ -48,14 +48,12 @@ export function hasExistingTexture(glbBuffer: Buffer): boolean {
  * Parse a GLB file into its JSON (glTF) and binary chunks
  */
 function parseGlb(buffer: Buffer): { gltf: any; binChunk: Buffer } {
-  // Header: magic(4) + version(4) + length(4) = 12 bytes
   const magic = buffer.readUInt32LE(0);
   if (magic !== 0x46546c67) throw new Error("Not a valid GLB file");
 
   const version = buffer.readUInt32LE(4);
   if (version !== 2) throw new Error(`Unsupported GLB version: ${version}`);
 
-  // Chunk 0: JSON
   const chunk0Length = buffer.readUInt32LE(12);
   const chunk0Type = buffer.readUInt32LE(16);
   if (chunk0Type !== 0x4e4f534a) throw new Error("First chunk is not JSON");
@@ -63,7 +61,6 @@ function parseGlb(buffer: Buffer): { gltf: any; binChunk: Buffer } {
   const jsonData = buffer.slice(20, 20 + chunk0Length).toString("utf8");
   const gltf = JSON.parse(jsonData);
 
-  // Chunk 1: BIN
   let binChunk = Buffer.alloc(0);
   const chunk1Offset = 20 + chunk0Length;
   if (chunk1Offset + 8 <= buffer.length) {
@@ -114,7 +111,6 @@ function readIndices(gltf: any, binChunk: Buffer): Uint32Array | null {
 
   const indices = new Uint32Array(count);
 
-  // Component type: 5121=UNSIGNED_BYTE, 5123=UNSIGNED_SHORT, 5125=UNSIGNED_INT
   switch (accessor.componentType) {
     case 5121:
       for (let i = 0; i < count; i++) indices[i] = binChunk.readUInt8(offset + i);
@@ -128,94 +124,6 @@ function readIndices(gltf: any, binChunk: Buffer): Uint32Array | null {
   }
 
   return indices;
-}
-
-/**
- * Generate spherical UV coordinates from vertex positions.
- * Projects the texture around the model like wrapping a photo around a sphere.
- * Best for single-image mode where the photo should wrap around the entire object.
- */
-function generateSphericalUVs(positions: Float32Array): Float32Array {
-  const count = positions.length / 3;
-  const uvs = new Float32Array(count * 2);
-
-  // Find center of the mesh
-  let cx = 0, cy = 0, cz = 0;
-  for (let i = 0; i < count; i++) {
-    cx += positions[i * 3];
-    cy += positions[i * 3 + 1];
-    cz += positions[i * 3 + 2];
-  }
-  cx /= count;
-  cy /= count;
-  cz /= count;
-
-  for (let i = 0; i < count; i++) {
-    const x = positions[i * 3] - cx;
-    const y = positions[i * 3 + 1] - cy;
-    const z = positions[i * 3 + 2] - cz;
-
-    // Spherical projection
-    const r = Math.sqrt(x * x + y * y + z * z);
-    if (r < 1e-8) {
-      uvs[i * 2] = 0.5;
-      uvs[i * 2 + 1] = 0.5;
-      continue;
-    }
-
-    // theta: angle around Y axis (longitude) -> U
-    const theta = Math.atan2(x, z);
-    // phi: angle from Y axis (latitude) -> V
-    const phi = Math.acos(Math.max(-1, Math.min(1, y / r)));
-
-    uvs[i * 2] = (theta + Math.PI) / (2 * Math.PI); // U: 0 to 1
-    uvs[i * 2 + 1] = phi / Math.PI; // V: 0 to 1
-  }
-
-  return uvs;
-}
-
-/**
- * Generate front-facing planar UV coordinates.
- * Projects the texture from the front (positive Z direction) onto the model.
- * Best for multi-image fallback where the primary image is a front view.
- * This preserves the correct spatial relationship between the photo and the front of the model.
- */
-function generateFrontProjectionUVs(positions: Float32Array): Float32Array {
-  const count = positions.length / 3;
-  const uvs = new Float32Array(count * 2);
-
-  // Find bounding box
-  let minX = Infinity, maxX = -Infinity;
-  let minY = Infinity, maxY = -Infinity;
-
-  for (let i = 0; i < count; i++) {
-    const x = positions[i * 3];
-    const y = positions[i * 3 + 1];
-    if (x < minX) minX = x;
-    if (x > maxX) maxX = x;
-    if (y < minY) minY = y;
-    if (y > maxY) maxY = y;
-  }
-
-  const rangeX = maxX - minX || 1;
-  const rangeY = maxY - minY || 1;
-
-  // Use the larger range to maintain aspect ratio
-  const range = Math.max(rangeX, rangeY);
-  const offsetX = (range - rangeX) / 2;
-  const offsetY = (range - rangeY) / 2;
-
-  for (let i = 0; i < count; i++) {
-    const x = positions[i * 3];
-    const y = positions[i * 3 + 1];
-
-    // Project from front: X maps to U, Y maps to V (inverted for image coords)
-    uvs[i * 2] = (x - minX + offsetX) / range;       // U: 0 to 1
-    uvs[i * 2 + 1] = 1.0 - (y - minY + offsetY) / range; // V: 0 to 1 (flipped for image)
-  }
-
-  return uvs;
 }
 
 /**
@@ -244,24 +152,20 @@ function computeNormals(positions: Float32Array, indices: Uint32Array | null): F
 
     const ax = positions[i0 * 3], ay = positions[i0 * 3 + 1], az = positions[i0 * 3 + 2];
     const bx = positions[i1 * 3], by = positions[i1 * 3 + 1], bz = positions[i1 * 3 + 2];
-    const cx2 = positions[i2 * 3], cy2 = positions[i2 * 3 + 1], cz2 = positions[i2 * 3 + 2];
+    const cx = positions[i2 * 3], cy = positions[i2 * 3 + 1], cz = positions[i2 * 3 + 2];
 
-    // Edge vectors
     const e1x = bx - ax, e1y = by - ay, e1z = bz - az;
-    const e2x = cx2 - ax, e2y = cy2 - ay, e2z = cz2 - az;
+    const e2x = cx - ax, e2y = cy - ay, e2z = cz - az;
 
-    // Cross product (face normal)
     const nx = e1y * e2z - e1z * e2y;
     const ny = e1z * e2x - e1x * e2z;
     const nz = e1x * e2y - e1y * e2x;
 
-    // Accumulate to vertices
     normals[i0 * 3] += nx; normals[i0 * 3 + 1] += ny; normals[i0 * 3 + 2] += nz;
     normals[i1 * 3] += nx; normals[i1 * 3 + 1] += ny; normals[i1 * 3 + 2] += nz;
     normals[i2 * 3] += nx; normals[i2 * 3 + 1] += ny; normals[i2 * 3 + 2] += nz;
   }
 
-  // Normalize
   for (let i = 0; i < vertexCount; i++) {
     const x = normals[i * 3], y = normals[i * 3 + 1], z = normals[i * 3 + 2];
     const len = Math.sqrt(x * x + y * y + z * z);
@@ -276,18 +180,158 @@ function computeNormals(positions: Float32Array, indices: Uint32Array | null): F
 }
 
 /**
+ * Compute the bounding box of positions
+ */
+function computeBounds(positions: Float32Array): {
+  min: [number, number, number];
+  max: [number, number, number];
+  size: [number, number, number];
+  center: [number, number, number];
+} {
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  const count = positions.length / 3;
+
+  for (let i = 0; i < count; i++) {
+    const x = positions[i * 3], y = positions[i * 3 + 1], z = positions[i * 3 + 2];
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+    if (z < minZ) minZ = z;
+    if (z > maxZ) maxZ = z;
+  }
+
+  return {
+    min: [minX, minY, minZ],
+    max: [maxX, maxY, maxZ],
+    size: [maxX - minX || 1, maxY - minY || 1, maxZ - minZ || 1],
+    center: [(minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2],
+  };
+}
+
+/**
+ * Generate triplanar UV coordinates.
+ *
+ * For each vertex, we determine which axis the vertex normal is most aligned with,
+ * then project the position onto the plane perpendicular to that axis.
+ *
+ * - If normal points mostly along Z (front/back): use X,Y as UV
+ * - If normal points mostly along Y (top/bottom): use X,Z as UV
+ * - If normal points mostly along X (left/right): use Z,Y as UV
+ *
+ * This gives each face the most "natural" looking texture projection based on
+ * which direction it faces, similar to how a real projector would illuminate it.
+ *
+ * All UVs are normalized to [0,1] based on the mesh bounding box so the
+ * texture tiles uniformly across the model.
+ */
+function generateTriplanarUVs(positions: Float32Array, normals: Float32Array): Float32Array {
+  const count = positions.length / 3;
+  const uvs = new Float32Array(count * 2);
+  const bounds = computeBounds(positions);
+
+  for (let i = 0; i < count; i++) {
+    const px = positions[i * 3];
+    const py = positions[i * 3 + 1];
+    const pz = positions[i * 3 + 2];
+
+    const nx = Math.abs(normals[i * 3]);
+    const ny = Math.abs(normals[i * 3 + 1]);
+    const nz = Math.abs(normals[i * 3 + 2]);
+
+    let u: number, v: number;
+
+    if (nz >= nx && nz >= ny) {
+      // Front/back facing — project onto XY plane
+      u = (px - bounds.min[0]) / bounds.size[0];
+      v = (py - bounds.min[1]) / bounds.size[1];
+    } else if (ny >= nx && ny >= nz) {
+      // Top/bottom facing — project onto XZ plane
+      u = (px - bounds.min[0]) / bounds.size[0];
+      v = (pz - bounds.min[2]) / bounds.size[2];
+    } else {
+      // Left/right facing — project onto ZY plane
+      u = (pz - bounds.min[2]) / bounds.size[2];
+      v = (py - bounds.min[1]) / bounds.size[1];
+    }
+
+    // Clamp to [0,1] to avoid texture wrapping artifacts
+    uvs[i * 2] = Math.max(0, Math.min(1, u));
+    uvs[i * 2 + 1] = Math.max(0, Math.min(1, 1.0 - v)); // Flip V for image coordinates
+  }
+
+  return uvs;
+}
+
+/**
+ * Generate spherical UV coordinates (legacy, kept as option).
+ * Wraps the texture around the model like a globe.
+ */
+function generateSphericalUVs(positions: Float32Array): Float32Array {
+  const count = positions.length / 3;
+  const uvs = new Float32Array(count * 2);
+  const bounds = computeBounds(positions);
+
+  for (let i = 0; i < count; i++) {
+    const x = positions[i * 3] - bounds.center[0];
+    const y = positions[i * 3 + 1] - bounds.center[1];
+    const z = positions[i * 3 + 2] - bounds.center[2];
+
+    const r = Math.sqrt(x * x + y * y + z * z);
+    if (r < 1e-8) {
+      uvs[i * 2] = 0.5;
+      uvs[i * 2 + 1] = 0.5;
+      continue;
+    }
+
+    const theta = Math.atan2(x, z);
+    const phi = Math.acos(Math.max(-1, Math.min(1, y / r)));
+
+    uvs[i * 2] = (theta + Math.PI) / (2 * Math.PI);
+    uvs[i * 2 + 1] = phi / Math.PI;
+  }
+
+  return uvs;
+}
+
+/**
+ * Generate front-facing planar UV coordinates.
+ * Projects the texture from the front (positive Z direction) onto the model.
+ */
+function generateFrontProjectionUVs(positions: Float32Array): Float32Array {
+  const count = positions.length / 3;
+  const uvs = new Float32Array(count * 2);
+  const bounds = computeBounds(positions);
+
+  const range = Math.max(bounds.size[0], bounds.size[1]);
+  const offsetX = (range - bounds.size[0]) / 2;
+  const offsetY = (range - bounds.size[1]) / 2;
+
+  for (let i = 0; i < count; i++) {
+    const x = positions[i * 3];
+    const y = positions[i * 3 + 1];
+
+    uvs[i * 2] = (x - bounds.min[0] + offsetX) / range;
+    uvs[i * 2 + 1] = 1.0 - (y - bounds.min[1] + offsetY) / range;
+  }
+
+  return uvs;
+}
+
+/**
  * Build a new GLB with texture applied
  *
  * @param glbBuffer - The geometry-only GLB buffer
  * @param imageBuffer - The source image to use as texture
  * @param imageMimeType - MIME type of the image
- * @param projectionMode - How to project the texture: "spherical" (wrap around) or "front" (planar from front)
+ * @param projectionMode - How to project the texture onto the mesh
  */
 export async function applyTextureToGlb(
   glbBuffer: Buffer,
   imageBuffer: Buffer,
   imageMimeType: string = "image/png",
-  projectionMode: ProjectionMode = "spherical"
+  projectionMode: ProjectionMode = "triplanar"
 ): Promise<Buffer> {
   const { gltf, binChunk } = parseGlb(glbBuffer);
 
@@ -300,12 +344,24 @@ export async function applyTextureToGlb(
   const indices = readIndices(gltf, binChunk);
   const vertexCount = positions.length / 3;
 
-  // Generate UVs based on projection mode
-  const uvs = projectionMode === "front"
-    ? generateFrontProjectionUVs(positions)
-    : generateSphericalUVs(positions);
-
+  // Compute normals first (needed for triplanar)
   const normals = computeNormals(positions, indices);
+
+  // Generate UVs based on projection mode
+  let uvs: Float32Array;
+  switch (projectionMode) {
+    case "triplanar":
+      uvs = generateTriplanarUVs(positions, normals);
+      break;
+    case "front":
+      uvs = generateFrontProjectionUVs(positions);
+      break;
+    case "spherical":
+      uvs = generateSphericalUVs(positions);
+      break;
+    default:
+      uvs = generateTriplanarUVs(positions, normals);
+  }
 
   // Build new binary data: original bin + UVs + normals + image
   const uvBuffer = Buffer.from(uvs.buffer);
@@ -347,7 +403,6 @@ export async function applyTextureToGlb(
 
   // Update glTF JSON
 
-  // Add buffer views for UVs, normals, and image
   if (!gltf.bufferViews) gltf.bufferViews = [];
   if (!gltf.accessors) gltf.accessors = [];
 
@@ -357,7 +412,7 @@ export async function applyTextureToGlb(
     buffer: 0,
     byteOffset: uvOffset,
     byteLength: uvBuffer.length,
-    target: 34962, // ARRAY_BUFFER
+    target: 34962,
   });
 
   // Normal buffer view
@@ -382,7 +437,7 @@ export async function applyTextureToGlb(
   gltf.accessors.push({
     bufferView: uvBVIdx,
     byteOffset: 0,
-    componentType: 5126, // FLOAT
+    componentType: 5126,
     count: vertexCount,
     type: "VEC2",
     min: [0, 0],
@@ -409,14 +464,14 @@ export async function applyTextureToGlb(
     mimeType: imageMimeType,
   });
 
-  // Add sampler
+  // Add sampler — use REPEAT wrapping for triplanar to allow seamless tiling
   if (!gltf.samplers) gltf.samplers = [];
   const samplerIdx = gltf.samplers.length;
   gltf.samplers.push({
     magFilter: 9729, // LINEAR
     minFilter: 9987, // LINEAR_MIPMAP_LINEAR
-    wrapS: 33071, // CLAMP_TO_EDGE (better for front projection to avoid wrapping artifacts)
-    wrapT: 33071,
+    wrapS: 33071,    // CLAMP_TO_EDGE
+    wrapT: 33071,    // CLAMP_TO_EDGE
   });
 
   // Add texture
@@ -427,9 +482,18 @@ export async function applyTextureToGlb(
     source: imageIdx,
   });
 
-  // Add material with the texture
+  // Add material with the texture — use unlit for photo-realistic appearance
+  // MeshBasicMaterial equivalent: no lighting calculations, just show the texture as-is
+  // This prevents the photo from looking washed out or over-lit
   if (!gltf.materials) gltf.materials = [];
   const materialIdx = gltf.materials.length;
+
+  // Use KHR_materials_unlit extension for photo-accurate color reproduction
+  if (!gltf.extensionsUsed) gltf.extensionsUsed = [];
+  if (!gltf.extensionsUsed.includes("KHR_materials_unlit")) {
+    gltf.extensionsUsed.push("KHR_materials_unlit");
+  }
+
   gltf.materials.push({
     name: "PhotoTexture",
     pbrMetallicRoughness: {
@@ -437,8 +501,12 @@ export async function applyTextureToGlb(
         index: textureIdx,
         texCoord: 0,
       },
+      baseColorFactor: [1, 1, 1, 1],
       metallicFactor: 0.0,
-      roughnessFactor: 0.8,
+      roughnessFactor: 1.0,
+    },
+    extensions: {
+      KHR_materials_unlit: {},
     },
     doubleSided: true,
   });
@@ -452,7 +520,6 @@ export async function applyTextureToGlb(
   // Update buffer length
   gltf.buffers[0].byteLength = newBinLength;
 
-  // Remove asset generator if present, add our own
   if (!gltf.asset) gltf.asset = {};
   gltf.asset.generator = "3D-Reconstructor-TextureApply";
   gltf.asset.version = "2.0";
@@ -463,28 +530,27 @@ export async function applyTextureToGlb(
   const jsonPadLength = (4 - (jsonBuffer.length % 4)) % 4;
   const paddedJsonBuffer = Buffer.concat([
     jsonBuffer,
-    Buffer.alloc(jsonPadLength, 0x20), // pad with spaces
+    Buffer.alloc(jsonPadLength, 0x20),
   ]);
 
-  // GLB structure: header(12) + JSON chunk(8 + data) + BIN chunk(8 + data)
   const totalLength = 12 + 8 + paddedJsonBuffer.length + 8 + newBinLength;
   const glb = Buffer.alloc(totalLength);
 
   let pos = 0;
 
   // Header
-  glb.writeUInt32LE(0x46546c67, pos); pos += 4; // magic "glTF"
-  glb.writeUInt32LE(2, pos); pos += 4; // version
-  glb.writeUInt32LE(totalLength, pos); pos += 4; // total length
+  glb.writeUInt32LE(0x46546c67, pos); pos += 4;
+  glb.writeUInt32LE(2, pos); pos += 4;
+  glb.writeUInt32LE(totalLength, pos); pos += 4;
 
   // JSON chunk
-  glb.writeUInt32LE(paddedJsonBuffer.length, pos); pos += 4; // chunk length
-  glb.writeUInt32LE(0x4e4f534a, pos); pos += 4; // chunk type "JSON"
+  glb.writeUInt32LE(paddedJsonBuffer.length, pos); pos += 4;
+  glb.writeUInt32LE(0x4e4f534a, pos); pos += 4;
   paddedJsonBuffer.copy(glb, pos); pos += paddedJsonBuffer.length;
 
   // BIN chunk
-  glb.writeUInt32LE(newBinLength, pos); pos += 4; // chunk length
-  glb.writeUInt32LE(0x004e4942, pos); pos += 4; // chunk type "BIN\0"
+  glb.writeUInt32LE(newBinLength, pos); pos += 4;
+  glb.writeUInt32LE(0x004e4942, pos); pos += 4;
   newBin.copy(glb, pos);
 
   return glb;

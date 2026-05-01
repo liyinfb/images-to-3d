@@ -26,3 +26,4 @@
 - [x] Ensure reconstruction API outputs textured GLB
 - [x] Fix incorrect texture placement when multiple images are used for reconstruction
 - [x] Fix runtime crash on deployed production site (mobile) - "An unexpected error occurred"
+- [x] Fix incorrect texture mapping on generated 3D models - texture looks wrong
