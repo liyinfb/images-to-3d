@@ -1,7 +1,7 @@
 import { Canvas } from "@react-three/fiber";
-import { OrbitControls, Environment, useGLTF, Center, ContactShadows, PresentationControls } from "@react-three/drei";
+import { OrbitControls, Environment, useGLTF, Center, ContactShadows } from "@react-three/drei";
 import { Suspense, useEffect, useRef, useState } from "react";
-import { Loader2, Download, RotateCcw, ZoomIn, ZoomOut } from "lucide-react";
+import { Loader2, Download } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import * as THREE from "three";
 
@@ -10,8 +10,8 @@ function Model({ url }: { url: string }) {
   const ref = useRef<THREE.Group>(null);
 
   useEffect(() => {
-    // Auto-scale the model to fit the viewport
     if (ref.current) {
+      // Auto-scale the model to fit the viewport
       const box = new THREE.Box3().setFromObject(ref.current);
       const size = box.getSize(new THREE.Vector3());
       const maxDim = Math.max(size.x, size.y, size.z);
@@ -21,6 +21,25 @@ function Model({ url }: { url: string }) {
       // Center the model
       const center = box.getCenter(new THREE.Vector3());
       ref.current.position.sub(center.multiplyScalar(scale));
+
+      // Ensure textures render correctly
+      scene.traverse((child) => {
+        if (child instanceof THREE.Mesh) {
+          // Enable double-sided rendering for all meshes
+          if (child.material) {
+            const materials = Array.isArray(child.material) ? child.material : [child.material];
+            materials.forEach((mat) => {
+              mat.side = THREE.DoubleSide;
+              // If the model has a texture, ensure it's properly configured
+              if (mat.map) {
+                mat.map.colorSpace = THREE.SRGBColorSpace;
+                mat.map.needsUpdate = true;
+              }
+              mat.needsUpdate = true;
+            });
+          }
+        }
+      });
     }
   }, [scene]);
 
@@ -67,14 +86,27 @@ export default function ModelViewer({ modelUrl, onDownload, className = "" }: Mo
 
         <Canvas
           camera={{ position: [3, 2, 5], fov: 45 }}
-          onCreated={() => setIsLoading(false)}
-          gl={{ antialias: true, toneMapping: THREE.ACESFilmicToneMapping }}
+          onCreated={({ gl }) => {
+            gl.outputColorSpace = THREE.SRGBColorSpace;
+            gl.toneMapping = THREE.ACESFilmicToneMapping;
+            gl.toneMappingExposure = 1.2;
+            setIsLoading(false);
+          }}
+          gl={{ antialias: true }}
           style={{ background: "transparent" }}
         >
-          <ambientLight intensity={0.5} />
-          <directionalLight position={[10, 10, 5]} intensity={1} castShadow />
-          <directionalLight position={[-5, 5, -5]} intensity={0.3} />
-          <pointLight position={[0, 5, 0]} intensity={0.5} color="#8B5CF6" />
+          {/* Lighting setup optimized for textured models */}
+          <ambientLight intensity={0.6} />
+          <directionalLight
+            position={[5, 8, 5]}
+            intensity={1.2}
+            castShadow
+            shadow-mapSize={[1024, 1024]}
+          />
+          <directionalLight position={[-5, 5, -3]} intensity={0.5} />
+          <directionalLight position={[0, -3, 5]} intensity={0.2} />
+          {/* Subtle rim light for depth */}
+          <pointLight position={[-3, 2, -5]} intensity={0.4} color="#a78bfa" />
 
           <Suspense fallback={<LoadingFallback />}>
             <Center>
@@ -88,7 +120,7 @@ export default function ModelViewer({ modelUrl, onDownload, className = "" }: Mo
               far={4}
               color="#8B5CF6"
             />
-            <Environment preset="studio" />
+            <Environment preset="studio" environmentIntensity={0.4} />
           </Suspense>
 
           <OrbitControls

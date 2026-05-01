@@ -6,6 +6,7 @@ import { z } from "zod";
 import { createReconstructionJob, getReconstructionJob, getUserReconstructionJobs, updateReconstructionJob } from "./db";
 import { storagePut } from "./storage";
 import { reconstructImage, reconstructMultipleImages } from "./reconstruction";
+import { applyTextureToGlb } from "./textureApply";
 import { nanoid } from "nanoid";
 
 export const appRouter = router({
@@ -95,9 +96,21 @@ export const appRouter = router({
               );
             }
 
+            // Apply texture from source image to the 3D model
+            console.log(`[Job ${jobId}] Applying texture from source image...`);
+            await updateReconstructionJob(jobId, { progress: 90 }).catch(() => {});
+            let finalGlb = result.glbBuffer;
+            try {
+              finalGlb = await applyTextureToGlb(result.glbBuffer, imageBuffers[0].buffer, "image/png");
+              console.log(`[Job ${jobId}] Texture applied successfully (${finalGlb.length} bytes)`);
+            } catch (texError) {
+              console.warn(`[Job ${jobId}] Texture application failed, using untextured model:`, texError);
+              // Continue with the untextured model rather than failing
+            }
+
             // Upload the GLB model to S3
             const modelKey = `reconstructions/${userId}/${uniqueId}/model.glb`;
-            const { url: modelUrl } = await storagePut(modelKey, result.glbBuffer, "model/gltf-binary");
+            const { url: modelUrl } = await storagePut(modelKey, finalGlb, "model/gltf-binary");
 
             const processingTimeMs = Date.now() - startTime;
 
