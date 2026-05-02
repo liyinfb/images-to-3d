@@ -69,8 +69,15 @@ function sceneHasTextures(scene: THREE.Group): boolean {
     if (child instanceof THREE.Mesh && child.material) {
       const materials = Array.isArray(child.material) ? child.material : [child.material];
       for (const mat of materials) {
+        // Check MeshStandardMaterial and MeshPhysicalMaterial (PBR models)
         if (mat instanceof THREE.MeshStandardMaterial || mat instanceof THREE.MeshPhysicalMaterial) {
           if (mat.map || mat.emissiveMap || mat.normalMap) {
+            hasTexture = true;
+          }
+        }
+        // Check MeshBasicMaterial (used by KHR_materials_unlit extension for photo textures)
+        if (mat instanceof THREE.MeshBasicMaterial) {
+          if (mat.map) {
             hasTexture = true;
           }
         }

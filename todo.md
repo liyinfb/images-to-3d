@@ -37,3 +37,5 @@
 - [x] Restore texture application for frogleo geometry-only models
 - [x] Add retry logic for transient network errors in frogleo fallback
 - [x] Improve error handling to always fall through to TRELLIS on any frogleo failure
+- [x] Fix: Multi-view TRELLIS models have no texture (white/untextured) - need texture applied in all paths
+- [x] Fix: ModelViewer was overriding photo textures with clay material (MeshBasicMaterial not detected)
