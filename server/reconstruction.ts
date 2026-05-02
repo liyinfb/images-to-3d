@@ -14,6 +14,9 @@
 // TripoSG space (Gradio 5.x, /gradio_api/ prefix) - outputs TEXTURED models
 const TRIPOSG_SPACE_URL = "https://vast-ai-triposg.hf.space";
 
+// Stable Fast 3D space (Gradio 4.x, /api/ prefix) - outputs TEXTURED UV-unwrapped models
+const SF3D_SPACE_URL = "https://stabilityai-stable-fast-3d.hf.space";
+
 // Primary fallback space (frogleo/Image-to-3D - Gradio 4.x, no prefix needed)
 const PRIMARY_SPACE_URL = "https://frogleo-image-to-3d.hf.space";
 
@@ -539,8 +542,9 @@ async function callNamedEndpoint(
   useGradioApiPrefix: boolean = true,
   onProgress?: (message: string) => void
 ): Promise<any[]> {
-  const prefix = useGradioApiPrefix ? "/gradio_api" : "";
-  const callUrl = `${spaceUrl}${prefix}/call${endpointName}`;
+  // Gradio 5.x uses /gradio_api/call, Gradio 4.x uses /api
+  const prefix = useGradioApiPrefix ? "/gradio_api/call" : "/api";
+  const callUrl = `${spaceUrl}${prefix}${endpointName}`;
 
   console.log(`[Reconstruction] POST ${callUrl}`);
 
@@ -565,7 +569,7 @@ async function callNamedEndpoint(
   onProgress?.(`Processing ${endpointName}...`);
 
   // Stream the result
-  const streamUrl = `${spaceUrl}${prefix}/call${endpointName}/${eventId}`;
+  const streamUrl = `${spaceUrl}${prefix}${endpointName}/${eventId}`;
   const streamResponse = await fetch(streamUrl, {
     method: "GET",
     signal: AbortSignal.timeout(timeoutMs),
@@ -629,6 +633,84 @@ async function callNamedEndpoint(
   }
 
   return finalData;
+}
+
+/**
+ * Stable Fast 3D (SF3D) reconstruction - generates natively textured UV-unwrapped 3D models.
+ *
+ * Pipeline:
+ * 1. Upload image
+ * 2. /run_button -> textured GLB with UV mapping
+ */
+async function reconstructWithSF3D(
+  imageBuffer: Buffer,
+  filename: string,
+  onProgress?: (progress: number, message: string) => void
+): Promise<ReconstructionResult> {
+  onProgress?.(5, "Uploading image to Stable Fast 3D...");
+
+  // Upload image to SF3D space (Gradio 4.x uses /upload, not /gradio_api/upload)
+  const paths = await uploadToSpace(SF3D_SPACE_URL, imageBuffer, filename, false);
+  if (!paths || paths.length === 0) throw new Error("Upload to SF3D failed");
+  const filePath = paths[0];
+  console.log("[Reconstruction] SF3D: uploaded to", filePath);
+
+  // Build image reference for Gradio 4.x
+  const imageRef = {
+    path: filePath,
+    url: `${SF3D_SPACE_URL}/file=${filePath}`,
+    orig_name: filename,
+    size: imageBuffer.length,
+    mime_type: "image/png",
+    meta: { _type: "gradio.FileData" },
+  };
+
+  onProgress?.(15, "Generating textured 3D model...");
+
+  // Call /run_button endpoint with default parameters
+  // Parameters: Input Image, Foreground Ratio (0.85), Remeshing (None), Target Vertex Count (-1), Texture Size (1024)
+  const result = await callNamedEndpoint(
+    SF3D_SPACE_URL,
+    "/run_button",
+    [imageRef, 0.85, "None", -1, 1024],
+    5 * 60 * 1000, // 5 min timeout
+    false, // Gradio 4.x uses /api/ not /gradio_api/
+    (msg) => {
+      onProgress?.(50, msg);
+    }
+  );
+
+  // Result should be [preview_image, 3d_model]
+  // The 3D model is at index 1
+  if (!result || result.length < 2) {
+    throw new Error("No valid output from SF3D");
+  }
+
+  const modelData = result[1];
+  const glbPath = modelData?.path || modelData?.url || (modelData?.value && (modelData.value.path || modelData.value.url));
+
+  if (!glbPath || !glbPath.includes(".glb")) {
+    // Try findGlbPath as fallback
+    const altPath = findGlbPath(result);
+    if (!altPath) {
+      throw new Error("No GLB file found in SF3D output");
+    }
+    const glbBuffer = await downloadFile(SF3D_SPACE_URL, altPath, false);
+    console.log("[Reconstruction] SF3D: downloaded textured GLB:", glbBuffer.length, "bytes");
+    onProgress?.(100, "3D model ready!");
+    return { glbBuffer, filename: `${filename.replace(/\.[^.]+$/, "")}_sf3d.glb`, hasNativeTexture: true };
+  }
+
+  onProgress?.(80, "Downloading textured 3D model...");
+  const glbBuffer = await downloadFile(SF3D_SPACE_URL, glbPath, false);
+  console.log("[Reconstruction] SF3D: downloaded textured GLB:", glbBuffer.length, "bytes");
+
+  onProgress?.(100, "3D model ready!");
+  return {
+    glbBuffer,
+    filename: `${filename.replace(/\.[^.]+$/, "")}_sf3d.glb`,
+    hasNativeTexture: true,
+  };
 }
 
 /**
@@ -801,6 +883,16 @@ export async function reconstructImage(
   } catch (tripoError) {
     const tripoMsg = (tripoError as Error).message;
     console.warn("[Reconstruction] TripoSG failed:", tripoMsg);
+    // Fall through to SF3D
+  }
+
+  // Try Stable Fast 3D (produces textured UV-unwrapped models)
+  try {
+    onProgress?.(5, "Trying Stable Fast 3D...");
+    return await reconstructWithSF3D(imageBuffer, filename, onProgress);
+  } catch (sf3dError) {
+    const sf3dMsg = (sf3dError as Error).message;
+    console.warn("[Reconstruction] SF3D failed:", sf3dMsg);
     // Fall through to frogleo
   }
 

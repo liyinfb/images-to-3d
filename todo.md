@@ -39,3 +39,8 @@
 - [x] Improve error handling to always fall through to TRELLIS on any frogleo failure
 - [x] Fix: Multi-view TRELLIS models have no texture (white/untextured) - need texture applied in all paths
 - [x] Fix: ModelViewer was overriding photo textures with clay material (MeshBasicMaterial not detected)
+- [x] Fix: Texture doesn't fit model - front projection creates flat decal effect on complex shapes
+- [x] Find/integrate a 3D reconstruction service that outputs natively textured models
+- [x] Add Stable Fast 3D (SF3D) as second backend (natively textured UV-unwrapped models)
+- [x] Implement AI multi-view texture atlas using built-in image generation + sharp
+- [x] Fix callNamedEndpoint to support both Gradio 4.x and 5.x API paths

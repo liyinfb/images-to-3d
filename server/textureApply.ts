@@ -1,30 +1,30 @@
 /**
  * Texture Application Service
  *
- * Takes a geometry-only GLB and a source image, then:
- * 1. Generates UV coordinates using triplanar projection (blends from 3 directions)
+ * Takes a geometry-only GLB and a texture image, then:
+ * 1. Generates UV coordinates using the selected projection mode
  * 2. Computes vertex normals for proper lighting
- * 3. Embeds the source image as a texture
+ * 3. Embeds the texture image
  * 4. Outputs a fully textured GLB file
  *
- * Triplanar projection maps the texture from front (Z), top (Y), and side (X)
- * directions simultaneously, blending based on face normals. This produces
- * natural-looking textures on arbitrary mesh shapes without seam artifacts.
+ * Projection modes:
+ * - "atlas": Multi-view atlas mode. Expects a 2x2 texture atlas with:
+ *     ┌───────┬───────┐
+ *     │ Front │ Right │
+ *     ├───────┼───────┤
+ *     │ Back  │ Left  │
+ *     └───────┴───────┘
+ *   Each face is mapped to the quadrant matching its dominant normal direction.
  *
- * The key insight: instead of trying to unwrap the mesh (which requires complex
- * algorithms), we project the texture from the direction each face is most
- * "facing" — like projecting a slide onto a surface from 3 projectors.
- *
- * Since GLB format only supports a single UV set per vertex, we bake the
- * triplanar blend into the UV coordinates by choosing the dominant projection
- * axis per-face and computing UVs from that axis's planar projection.
+ * - "triplanar": Legacy triplanar projection from a single image.
+ * - "front": Simple front-facing planar projection.
+ * - "spherical": Spherical wrapping.
  */
 
-export type ProjectionMode = "triplanar" | "spherical" | "front";
+export type ProjectionMode = "atlas" | "triplanar" | "spherical" | "front";
 
 /**
  * Check if a GLB file already has textures/materials embedded.
- * Used to skip re-texturing when TRELLIS multi-view already outputs textured models.
  */
 export function hasExistingTexture(glbBuffer: Buffer): boolean {
   try {
@@ -211,20 +211,114 @@ function computeBounds(positions: Float32Array): {
 }
 
 /**
- * Generate triplanar UV coordinates.
+ * Generate atlas UV coordinates for a 2x2 texture atlas.
  *
- * For each vertex, we determine which axis the vertex normal is most aligned with,
- * then project the position onto the plane perpendicular to that axis.
+ * The atlas layout is:
+ *   ┌───────┬───────┐
+ *   │ Front │ Right │  (top row: v 0.0 to 0.5)
+ *   ├───────┼───────┤
+ *   │ Back  │ Left  │  (bottom row: v 0.5 to 1.0)
+ *   └───────┴───────┘
+ *   u: 0.0-0.5  0.5-1.0
  *
- * - If normal points mostly along Z (front/back): use X,Y as UV
- * - If normal points mostly along Y (top/bottom): use X,Z as UV
- * - If normal points mostly along X (left/right): use Z,Y as UV
+ * Each vertex is assigned to a quadrant based on its normal direction:
+ * - Front (nz > 0): top-left quadrant
+ * - Back (nz < 0): bottom-left quadrant
+ * - Right (nx > 0): top-right quadrant
+ * - Left (nx < 0): bottom-right quadrant
+ * - Top/Bottom: blended between front and back
  *
- * This gives each face the most "natural" looking texture projection based on
- * which direction it faces, similar to how a real projector would illuminate it.
- *
- * All UVs are normalized to [0,1] based on the mesh bounding box so the
- * texture tiles uniformly across the model.
+ * Within each quadrant, the UV is a planar projection from the appropriate axis.
+ */
+function generateAtlasUVs(positions: Float32Array, normals: Float32Array): Float32Array {
+  const count = positions.length / 3;
+  const uvs = new Float32Array(count * 2);
+  const bounds = computeBounds(positions);
+
+  // Small margin to prevent sampling from adjacent quadrants
+  const MARGIN = 0.02;
+  const QUAD_MIN = MARGIN;
+  const QUAD_MAX = 0.5 - MARGIN;
+  const QUAD_RANGE = QUAD_MAX - QUAD_MIN;
+
+  for (let i = 0; i < count; i++) {
+    const px = positions[i * 3];
+    const py = positions[i * 3 + 1];
+    const pz = positions[i * 3 + 2];
+
+    const nx = normals[i * 3];
+    const ny = normals[i * 3 + 1];
+    const nz = normals[i * 3 + 2];
+
+    const absNx = Math.abs(nx);
+    const absNy = Math.abs(ny);
+    const absNz = Math.abs(nz);
+
+    // Normalized position within bounding box [0, 1]
+    const normX = (px - bounds.min[0]) / bounds.size[0];
+    const normY = (py - bounds.min[1]) / bounds.size[1];
+    const normZ = (pz - bounds.min[2]) / bounds.size[2];
+
+    let u: number, v: number;
+
+    // Determine which quadrant based on dominant normal direction
+    if (absNz >= absNx && absNz >= absNy) {
+      // Front or Back facing
+      // Project onto XY plane
+      const localU = QUAD_MIN + normX * QUAD_RANGE;
+      const localV = QUAD_MIN + (1 - normY) * QUAD_RANGE; // Flip Y for image coords
+
+      if (nz >= 0) {
+        // Front: top-left quadrant (u: 0-0.5, v: 0-0.5)
+        u = localU;
+        v = localV;
+      } else {
+        // Back: bottom-left quadrant (u: 0-0.5, v: 0.5-1.0)
+        // Mirror X for back view (looking from behind)
+        u = QUAD_MIN + (1 - normX) * QUAD_RANGE;
+        v = 0.5 + localV;
+      }
+    } else if (absNx >= absNy && absNx >= absNz) {
+      // Right or Left facing
+      // Project onto ZY plane
+      const localV = QUAD_MIN + (1 - normY) * QUAD_RANGE;
+
+      if (nx > 0) {
+        // Right: top-right quadrant (u: 0.5-1.0, v: 0-0.5)
+        const localU = QUAD_MIN + (1 - normZ) * QUAD_RANGE;
+        u = 0.5 + localU;
+        v = localV;
+      } else {
+        // Left: bottom-right quadrant (u: 0.5-1.0, v: 0.5-1.0)
+        const localU = QUAD_MIN + normZ * QUAD_RANGE;
+        u = 0.5 + localU;
+        v = 0.5 + localV;
+      }
+    } else {
+      // Top or Bottom facing — use front/back projection
+      const localU = QUAD_MIN + normX * QUAD_RANGE;
+      const localV = QUAD_MIN + (1 - normY) * QUAD_RANGE;
+
+      if (ny >= 0) {
+        // Top: map to front quadrant (top-left)
+        u = localU;
+        v = localV;
+      } else {
+        // Bottom: map to front quadrant (top-left)
+        u = localU;
+        v = localV;
+      }
+    }
+
+    uvs[i * 2] = Math.max(0, Math.min(1, u));
+    uvs[i * 2 + 1] = Math.max(0, Math.min(1, v));
+  }
+
+  return uvs;
+}
+
+/**
+ * Generate triplanar UV coordinates (legacy).
  */
 function generateTriplanarUVs(positions: Float32Array, normals: Float32Array): Float32Array {
   const count = positions.length / 3;
@@ -243,30 +337,25 @@ function generateTriplanarUVs(positions: Float32Array, normals: Float32Array): F
     let u: number, v: number;
 
     if (nz >= nx && nz >= ny) {
-      // Front/back facing — project onto XY plane
       u = (px - bounds.min[0]) / bounds.size[0];
       v = (py - bounds.min[1]) / bounds.size[1];
     } else if (ny >= nx && ny >= nz) {
-      // Top/bottom facing — project onto XZ plane
       u = (px - bounds.min[0]) / bounds.size[0];
       v = (pz - bounds.min[2]) / bounds.size[2];
     } else {
-      // Left/right facing — project onto ZY plane
       u = (pz - bounds.min[2]) / bounds.size[2];
       v = (py - bounds.min[1]) / bounds.size[1];
     }
 
-    // Clamp to [0,1] to avoid texture wrapping artifacts
     uvs[i * 2] = Math.max(0, Math.min(1, u));
-    uvs[i * 2 + 1] = Math.max(0, Math.min(1, 1.0 - v)); // Flip V for image coordinates
+    uvs[i * 2 + 1] = Math.max(0, Math.min(1, 1.0 - v));
   }
 
   return uvs;
 }
 
 /**
- * Generate spherical UV coordinates (legacy, kept as option).
- * Wraps the texture around the model like a globe.
+ * Generate spherical UV coordinates.
  */
 function generateSphericalUVs(positions: Float32Array): Float32Array {
   const count = positions.length / 3;
@@ -297,7 +386,6 @@ function generateSphericalUVs(positions: Float32Array): Float32Array {
 
 /**
  * Generate front-facing planar UV coordinates.
- * Projects the texture from the front (positive Z direction) onto the model.
  */
 function generateFrontProjectionUVs(positions: Float32Array): Float32Array {
   const count = positions.length / 3;
@@ -321,17 +409,12 @@ function generateFrontProjectionUVs(positions: Float32Array): Float32Array {
 
 /**
  * Build a new GLB with texture applied
- *
- * @param glbBuffer - The geometry-only GLB buffer
- * @param imageBuffer - The source image to use as texture
- * @param imageMimeType - MIME type of the image
- * @param projectionMode - How to project the texture onto the mesh
  */
 export async function applyTextureToGlb(
   glbBuffer: Buffer,
   imageBuffer: Buffer,
   imageMimeType: string = "image/png",
-  projectionMode: ProjectionMode = "triplanar"
+  projectionMode: ProjectionMode = "atlas"
 ): Promise<Buffer> {
   const { gltf, binChunk } = parseGlb(glbBuffer);
 
@@ -344,12 +427,15 @@ export async function applyTextureToGlb(
   const indices = readIndices(gltf, binChunk);
   const vertexCount = positions.length / 3;
 
-  // Compute normals first (needed for triplanar)
+  // Compute normals
   const normals = computeNormals(positions, indices);
 
   // Generate UVs based on projection mode
   let uvs: Float32Array;
   switch (projectionMode) {
+    case "atlas":
+      uvs = generateAtlasUVs(positions, normals);
+      break;
     case "triplanar":
       uvs = generateTriplanarUVs(positions, normals);
       break;
@@ -360,7 +446,7 @@ export async function applyTextureToGlb(
       uvs = generateSphericalUVs(positions);
       break;
     default:
-      uvs = generateTriplanarUVs(positions, normals);
+      uvs = generateAtlasUVs(positions, normals);
   }
 
   // Build new binary data: original bin + UVs + normals + image
@@ -402,7 +488,6 @@ export async function applyTextureToGlb(
   offset += imageBuffer.length + imagePadding;
 
   // Update glTF JSON
-
   if (!gltf.bufferViews) gltf.bufferViews = [];
   if (!gltf.accessors) gltf.accessors = [];
 
@@ -464,7 +549,7 @@ export async function applyTextureToGlb(
     mimeType: imageMimeType,
   });
 
-  // Add sampler — use REPEAT wrapping for triplanar to allow seamless tiling
+  // Add sampler
   if (!gltf.samplers) gltf.samplers = [];
   const samplerIdx = gltf.samplers.length;
   gltf.samplers.push({
@@ -482,13 +567,10 @@ export async function applyTextureToGlb(
     source: imageIdx,
   });
 
-  // Add material with the texture — use unlit for photo-realistic appearance
-  // MeshBasicMaterial equivalent: no lighting calculations, just show the texture as-is
-  // This prevents the photo from looking washed out or over-lit
+  // Add material with unlit extension for photo-accurate appearance
   if (!gltf.materials) gltf.materials = [];
   const materialIdx = gltf.materials.length;
 
-  // Use KHR_materials_unlit extension for photo-accurate color reproduction
   if (!gltf.extensionsUsed) gltf.extensionsUsed = [];
   if (!gltf.extensionsUsed.includes("KHR_materials_unlit")) {
     gltf.extensionsUsed.push("KHR_materials_unlit");
@@ -511,7 +593,7 @@ export async function applyTextureToGlb(
     doubleSided: true,
   });
 
-  // Update mesh primitive to use UVs, normals, and material
+  // Update mesh primitive
   const primitive = gltf.meshes[0].primitives[0];
   primitive.attributes.TEXCOORD_0 = uvAccIdx;
   primitive.attributes.NORMAL = normalAccIdx;
