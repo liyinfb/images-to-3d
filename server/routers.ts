@@ -6,7 +6,7 @@ import { z } from "zod";
 import { createReconstructionJob, getReconstructionJob, getUserReconstructionJobs, updateReconstructionJob } from "./db";
 import { storagePut } from "./storage";
 import { reconstructImage, reconstructMultipleImages } from "./reconstruction";
-// Texture application removed - using native textures from TripoSG or clean untextured models
+import { applyTextureToGlb } from "./textureApply";
 import { nanoid } from "nanoid";
 
 export const appRouter = router({
@@ -96,10 +96,27 @@ export const appRouter = router({
               );
             }
 
-            // Use the model directly - TripoSG provides native textures,
-            // frogleo provides clean geometry (displayed with attractive material in viewer)
-            const finalGlb = result.glbBuffer;
-            console.log(`[Job ${jobId}] Model ready: ${finalGlb.length} bytes, hasNativeTexture: ${result.hasNativeTexture}`);
+            // Apply texture if the model doesn't have native textures
+            // TripoSG produces natively textured models; frogleo produces geometry-only
+            let finalGlb = result.glbBuffer;
+            if (result.hasNativeTexture) {
+              console.log(`[Job ${jobId}] Model has native texture, skipping texture application`);
+            } else {
+              console.log(`[Job ${jobId}] Applying texture from source image...`);
+              await updateReconstructionJob(jobId, { progress: 90 }).catch(() => {});
+              try {
+                finalGlb = await applyTextureToGlb(
+                  result.glbBuffer,
+                  imageBuffers[0].buffer,
+                  "image/png",
+                  "front"
+                );
+                console.log(`[Job ${jobId}] Texture applied successfully (${finalGlb.length} bytes)`);
+              } catch (texError) {
+                console.warn(`[Job ${jobId}] Texture application failed, using untextured model:`, texError);
+                // Continue with the untextured model rather than failing
+              }
+            }
 
             // Upload the GLB model to S3
             const modelKey = `reconstructions/${userId}/${uniqueId}/model.glb`;

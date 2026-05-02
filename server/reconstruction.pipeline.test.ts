@@ -45,21 +45,22 @@ describe("ReconstructionResult interface", () => {
   });
 });
 
-describe("routers - reconstruction create no longer applies manual texture", () => {
-  it("routers.ts does not import applyTextureToGlb", async () => {
-    // Read the routers file content to verify texture application was removed
+describe("routers - reconstruction create applies texture conditionally", () => {
+  it("routers.ts imports applyTextureToGlb and uses hasNativeTexture", async () => {
     const fs = await import("fs");
     const routersContent = fs.readFileSync(
       new URL("./routers.ts", import.meta.url),
       "utf8"
     );
 
-    // Should NOT contain applyTextureToGlb import
-    expect(routersContent).not.toContain("applyTextureToGlb");
-    expect(routersContent).not.toContain("hasExistingTexture");
+    // Should import applyTextureToGlb for non-natively-textured models
+    expect(routersContent).toContain("applyTextureToGlb");
 
-    // Should contain the new hasNativeTexture log
+    // Should check hasNativeTexture to decide whether to apply texture
     expect(routersContent).toContain("hasNativeTexture");
+
+    // Should use front projection mode
+    expect(routersContent).toContain('"front"');
   });
 });
 

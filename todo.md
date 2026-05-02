@@ -33,3 +33,7 @@
 - [x] Update ModelViewer to handle both textured and untextured models with attractive material
 - [x] Add fallback chain: TripoSG → frogleo → TRELLIS
 - [x] Add pipeline tests for hasNativeTexture field
+- [x] Fix: Models are generated without any texture - need reliable texture on output
+- [x] Restore texture application for frogleo geometry-only models
+- [x] Add retry logic for transient network errors in frogleo fallback
+- [x] Improve error handling to always fall through to TRELLIS on any frogleo failure

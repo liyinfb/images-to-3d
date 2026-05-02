@@ -804,25 +804,25 @@ export async function reconstructImage(
     // Fall through to frogleo
   }
 
-  // Try frogleo (reliable geometry-only)
-  try {
-    onProgress?.(5, "Connecting to reconstruction service...");
-    return await reconstructSingleImage(imageBuffer, filename, onProgress);
-  } catch (primaryError) {
-    const errorMsg = (primaryError as Error).message;
-    console.error("[Reconstruction] Primary (frogleo) failed:", errorMsg);
+  // Try frogleo (reliable geometry-only) with one retry for transient network errors
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      onProgress?.(5, attempt === 0 ? "Connecting to reconstruction service..." : "Retrying reconstruction service...");
+      return await reconstructSingleImage(imageBuffer, filename, onProgress);
+    } catch (primaryError) {
+      const errorMsg = (primaryError as Error).message;
+      console.error(`[Reconstruction] Primary (frogleo) attempt ${attempt + 1} failed:`, errorMsg);
 
-    // If it's a quota error or service unavailable, try TRELLIS
-    if (
-      errorMsg.includes("GPU quota") ||
-      errorMsg.includes("503") ||
-      errorMsg.includes("502") ||
-      errorMsg.includes("timeout") ||
-      errorMsg.includes("SSE") ||
-      errorMsg.includes("Upload failed")
-    ) {
+      // For transient network errors, retry once
+      if (attempt === 0 && (errorMsg.includes("fetch failed") || errorMsg.includes("ECONNRESET") || errorMsg.includes("ETIMEDOUT"))) {
+        console.log("[Reconstruction] Transient network error, retrying frogleo...");
+        await new Promise(r => setTimeout(r, 3000)); // Wait 3s before retry
+        continue;
+      }
+
+      // Try TRELLIS as final fallback for any error
       console.log("[Reconstruction] Trying fallback (TRELLIS single)...");
-      onProgress?.(5, "Primary service busy, trying alternative...");
+      onProgress?.(5, "Primary service unavailable, trying alternative...");
 
       try {
         return await reconstructWithTrellisSingle(imageBuffer, filename, onProgress);
@@ -830,7 +830,7 @@ export async function reconstructImage(
         const fbMsg = (fallbackError as Error).message;
         console.error("[Reconstruction] TRELLIS fallback also failed:", fbMsg);
 
-        if (fbMsg.includes("GPU quota")) {
+        if (fbMsg.includes("GPU quota") || errorMsg.includes("GPU quota")) {
           throw new Error(
             "All reconstruction services have exceeded their GPU quota. " +
             "This is a limitation of free HuggingFace Spaces. Please try again in a few hours."
@@ -841,16 +841,10 @@ export async function reconstructImage(
         );
       }
     }
-
-    if (errorMsg.includes("GPU quota")) {
-      throw new Error(
-        "The reconstruction service has exceeded its GPU quota. " +
-        "This is a limitation of free HuggingFace Spaces. Please try again in a few hours."
-      );
-    }
-
-    throw primaryError;
   }
+
+  // Should not reach here, but just in case
+  throw new Error("Reconstruction failed unexpectedly.");
 }
 
 /**
