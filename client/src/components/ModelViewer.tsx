@@ -59,6 +59,51 @@ class CanvasErrorBoundary extends Component<CanvasErrorBoundaryProps, CanvasErro
   }
 }
 
+/**
+ * Check if a loaded GLTF scene has any textures/images.
+ * Used to decide whether to apply a default attractive material.
+ */
+function sceneHasTextures(scene: THREE.Group): boolean {
+  let hasTexture = false;
+  scene.traverse((child) => {
+    if (child instanceof THREE.Mesh && child.material) {
+      const materials = Array.isArray(child.material) ? child.material : [child.material];
+      for (const mat of materials) {
+        if (mat instanceof THREE.MeshStandardMaterial || mat instanceof THREE.MeshPhysicalMaterial) {
+          if (mat.map || mat.emissiveMap || mat.normalMap) {
+            hasTexture = true;
+          }
+        }
+      }
+    }
+  });
+  return hasTexture;
+}
+
+/**
+ * Apply an attractive default material to untextured models.
+ * Uses a smooth clay/ceramic look with subtle color variation.
+ */
+function applyDefaultMaterial(scene: THREE.Group) {
+  const material = new THREE.MeshPhysicalMaterial({
+    color: new THREE.Color(0.65, 0.62, 0.58), // Warm clay tone
+    metalness: 0.05,
+    roughness: 0.55,
+    clearcoat: 0.3,
+    clearcoatRoughness: 0.4,
+    side: THREE.DoubleSide,
+    envMapIntensity: 0.8,
+  });
+
+  scene.traverse((child) => {
+    if (child instanceof THREE.Mesh) {
+      child.material = material;
+      child.castShadow = true;
+      child.receiveShadow = true;
+    }
+  });
+}
+
 function Model({ url }: { url: string }) {
   const groupRef = useRef<THREE.Group>(null);
   const [loaded, setLoaded] = useState(false);
@@ -93,20 +138,28 @@ function Model({ url }: { url: string }) {
           model.position.sub(center);
         }
 
-        // Ensure textures render correctly
-        model.traverse((child) => {
-          if (child instanceof THREE.Mesh && child.material) {
-            const materials = Array.isArray(child.material) ? child.material : [child.material];
-            materials.forEach((mat) => {
-              mat.side = THREE.DoubleSide;
-              if (mat.map) {
-                mat.map.colorSpace = THREE.SRGBColorSpace;
-                mat.map.needsUpdate = true;
-              }
-              mat.needsUpdate = true;
-            });
-          }
-        });
+        // Check if model has native textures
+        const hasTextures = sceneHasTextures(model);
+
+        if (hasTextures) {
+          // Model has textures - ensure they render correctly
+          model.traverse((child) => {
+            if (child instanceof THREE.Mesh && child.material) {
+              const materials = Array.isArray(child.material) ? child.material : [child.material];
+              materials.forEach((mat) => {
+                mat.side = THREE.DoubleSide;
+                if (mat.map) {
+                  mat.map.colorSpace = THREE.SRGBColorSpace;
+                  mat.map.needsUpdate = true;
+                }
+                mat.needsUpdate = true;
+              });
+            }
+          });
+        } else {
+          // No textures - apply attractive default material
+          applyDefaultMaterial(model);
+        }
 
         setLoaded(true);
       },

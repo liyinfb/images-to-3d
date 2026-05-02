@@ -1,15 +1,20 @@
 /**
  * 3D Reconstruction Service
  *
- * Supports two modes:
- * 1. Single-image: Uses frogleo/Image-to-3D (primary) with TRELLIS fallback
- * 2. Multi-image: Uses TRELLIS community space which supports multi-view gallery input
+ * Supports multiple backends with automatic fallback:
+ * 1. TripoSG (primary): Generates natively textured 3D models from single images
+ * 2. frogleo/Image-to-3D (fallback): Reliable geometry-only output
+ * 3. TRELLIS (multi-view): Supports multi-image gallery input
  *
- * Primary Space: https://huggingface.co/spaces/frogleo/Image-to-3D
- * Multi-view Space: https://huggingface.co/spaces/trellis-community/TRELLIS
+ * TripoSG Space: https://huggingface.co/spaces/VAST-AI/TripoSG (Gradio 5.x)
+ * Primary Space: https://huggingface.co/spaces/frogleo/Image-to-3D (Gradio 4.x)
+ * Multi-view Space: https://huggingface.co/spaces/trellis-community/TRELLIS (Gradio 5.x)
  */
 
-// Primary space (frogleo/Image-to-3D - Gradio 4.x, no prefix needed)
+// TripoSG space (Gradio 5.x, /gradio_api/ prefix) - outputs TEXTURED models
+const TRIPOSG_SPACE_URL = "https://vast-ai-triposg.hf.space";
+
+// Primary fallback space (frogleo/Image-to-3D - Gradio 4.x, no prefix needed)
 const PRIMARY_SPACE_URL = "https://frogleo-image-to-3d.hf.space";
 
 // TRELLIS space (Gradio 5.x, needs /gradio_api/ prefix) - supports multi-image
@@ -195,7 +200,8 @@ async function submitAndWait(
 /**
  * Download a file from a Gradio space
  */
-async function downloadFile(spaceUrl: string, filePath: string): Promise<Buffer> {
+async function downloadFile(spaceUrl: string, filePath: string, useGradioApiPrefix: boolean = false): Promise<Buffer> {
+  const prefix = useGradioApiPrefix ? "/gradio_api" : "";
   let url: string;
   if (filePath.startsWith("http")) {
     url = filePath;
@@ -204,7 +210,7 @@ async function downloadFile(spaceUrl: string, filePath: string): Promise<Buffer>
     url = `${spaceUrl}${filePath}`;
   } else if (filePath.startsWith("/tmp/") || filePath.startsWith("/")) {
     // Temp files need the /file= prefix
-    url = `${spaceUrl}/file=${filePath}`;
+    url = `${spaceUrl}${prefix}/file=${filePath}`;
   } else {
     url = `${spaceUrl}/${filePath}`;
   }
@@ -249,6 +255,8 @@ function findGlbPath(outputData: any[]): string | null {
 export interface ReconstructionResult {
   glbBuffer: Buffer;
   filename: string;
+  /** Whether the model has native textures (from TripoSG or TRELLIS) */
+  hasNativeTexture: boolean;
 }
 
 /**
@@ -323,6 +331,7 @@ async function reconstructSingleImage(
   return {
     glbBuffer,
     filename: `model_${Date.now()}.glb`,
+    hasNativeTexture: false,
   };
 }
 
@@ -423,7 +432,7 @@ async function reconstructMultiImage(
       try {
         const buf = await downloadFile(TRELLIS_SPACE_URL, path);
         if (buf.length > 4 && buf.readUInt32LE(0) === 0x46546c67) {
-          return { glbBuffer: buf, filename: `model_multi_${Date.now()}.glb` };
+          return { glbBuffer: buf, filename: `model_multi_${Date.now()}.glb`, hasNativeTexture: true };
         }
       } catch {
         continue;
@@ -436,7 +445,7 @@ async function reconstructMultiImage(
   if (!glbBuffer || glbBuffer.length === 0) throw new Error("Downloaded GLB is empty");
 
   onProgress?.(100, "3D model ready!");
-  return { glbBuffer, filename: `model_multi_${Date.now()}.glb` };
+  return { glbBuffer, filename: `model_multi_${Date.now()}.glb`, hasNativeTexture: true };
 }
 
 /**
@@ -502,7 +511,7 @@ async function reconstructWithTrellisSingle(
       try {
         const buf = await downloadFile(TRELLIS_SPACE_URL, path);
         if (buf.length > 4 && buf.readUInt32LE(0) === 0x46546c67) {
-          return { glbBuffer: buf, filename: `model_${Date.now()}.glb` };
+          return { glbBuffer: buf, filename: `model_${Date.now()}.glb`, hasNativeTexture: true };
         }
       } catch {
         continue;
@@ -515,26 +524,295 @@ async function reconstructWithTrellisSingle(
   if (!glbBuffer || glbBuffer.length === 0) throw new Error("Downloaded GLB is empty");
 
   onProgress?.(100, "3D model ready!");
-  return { glbBuffer, filename: `model_${Date.now()}.glb` };
+  return { glbBuffer, filename: `model_${Date.now()}.glb`, hasNativeTexture: true };
+}
+
+/**
+ * Call a Gradio 5.x named endpoint using the /call/ REST API.
+ * Returns the result data array or throws an error.
+ */
+async function callNamedEndpoint(
+  spaceUrl: string,
+  endpointName: string,
+  data: any[],
+  timeoutMs: number = 5 * 60 * 1000,
+  useGradioApiPrefix: boolean = true,
+  onProgress?: (message: string) => void
+): Promise<any[]> {
+  const prefix = useGradioApiPrefix ? "/gradio_api" : "";
+  const callUrl = `${spaceUrl}${prefix}/call${endpointName}`;
+
+  console.log(`[Reconstruction] POST ${callUrl}`);
+
+  // Initiate the call
+  const postResponse = await fetch(callUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ data }),
+  });
+
+  if (!postResponse.ok) {
+    const text = await postResponse.text();
+    throw new Error(`Call initiation failed: ${postResponse.status} ${text}`);
+  }
+
+  const { event_id: eventId } = await postResponse.json();
+  if (!eventId) {
+    throw new Error("No event_id returned from call initiation");
+  }
+
+  console.log(`[Reconstruction] Streaming ${endpointName} event_id=${eventId}`);
+  onProgress?.(`Processing ${endpointName}...`);
+
+  // Stream the result
+  const streamUrl = `${spaceUrl}${prefix}/call${endpointName}/${eventId}`;
+  const streamResponse = await fetch(streamUrl, {
+    method: "GET",
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+
+  if (!streamResponse.ok || !streamResponse.body) {
+    throw new Error(`Stream failed: ${streamResponse.status}`);
+  }
+
+  const reader = streamResponse.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let currentEvent = "";
+  let finalData: any[] | null = null;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        if (line.startsWith("event: ")) {
+          currentEvent = line.slice(7).trim();
+        } else if (line.startsWith("data: ")) {
+          const dataStr = line.slice(6);
+
+          if (currentEvent === "error") {
+            reader.cancel().catch(() => {});
+            // "null" error typically means GPU quota exhaustion
+            if (dataStr === "null" || dataStr.trim() === "null") {
+              throw new Error("GPU quota exceeded (ZeroGPU limit reached)");
+            }
+            throw new Error(`Processing error: ${dataStr}`);
+          } else if (currentEvent === "complete") {
+            try {
+              finalData = JSON.parse(dataStr);
+            } catch {
+              finalData = null;
+            }
+            reader.cancel().catch(() => {});
+            break;
+          } else if (currentEvent === "generating") {
+            onProgress?.("Generating...");
+          }
+        }
+      }
+
+      if (finalData !== null) break;
+    }
+  } catch (e) {
+    reader.cancel().catch(() => {});
+    throw e;
+  }
+
+  if (!finalData || !Array.isArray(finalData)) {
+    throw new Error("No valid result data received");
+  }
+
+  return finalData;
+}
+
+/**
+ * TripoSG reconstruction - generates natively textured 3D models.
+ *
+ * Pipeline:
+ * 1. Upload image
+ * 2. /run_segmentation -> background-removed image
+ * 3. /image_to_3d -> geometry GLB
+ * 4. /run_texture -> textured GLB
+ *
+ * Uses Gradio 5.x /call/ REST API.
+ */
+async function reconstructWithTripoSG(
+  imageBuffer: Buffer,
+  filename: string,
+  onProgress?: (progress: number, message: string) => void
+): Promise<ReconstructionResult> {
+  onProgress?.(5, "Uploading image to TripoSG...");
+
+  // Upload image
+  const paths = await uploadToSpace(TRIPOSG_SPACE_URL, imageBuffer, filename, true);
+  if (!paths || paths.length === 0) throw new Error("Upload to TripoSG failed");
+  const filePath = paths[0];
+  console.log("[Reconstruction] TripoSG: uploaded to", filePath);
+
+  const imageRef = {
+    path: filePath,
+    url: `${TRIPOSG_SPACE_URL}/file=${filePath}`,
+    orig_name: filename,
+    size: imageBuffer.length,
+    mime_type: "image/png",
+    meta: { _type: "gradio.FileData" },
+  };
+
+  onProgress?.(10, "Removing background...");
+
+  // Step 1: Run segmentation (background removal)
+  let segImageRef = imageRef;
+  try {
+    const segResult = await callNamedEndpoint(
+      TRIPOSG_SPACE_URL,
+      "/run_segmentation",
+      [imageRef],
+      60_000,
+      true,
+      (msg) => onProgress?.(15, msg)
+    );
+    if (segResult && segResult[0] && typeof segResult[0] === "object") {
+      segImageRef = segResult[0];
+      console.log("[Reconstruction] TripoSG: segmentation complete");
+    }
+  } catch (segError) {
+    // Segmentation failure is not critical - continue with original image
+    console.warn("[Reconstruction] TripoSG: segmentation failed, using original image:", (segError as Error).message);
+  }
+
+  onProgress?.(20, "Generating 3D geometry (1-3 minutes)...");
+
+  // Step 2: Generate geometry
+  // Params: image, seed, num_inference_steps, guidance_scale, simplify, target_face_num
+  const geoResult = await callNamedEndpoint(
+    TRIPOSG_SPACE_URL,
+    "/image_to_3d",
+    [segImageRef, 0, 50, 7.0, true, 100000],
+    5 * 60 * 1000,
+    true,
+    (msg) => onProgress?.(40, msg)
+  );
+
+  // Extract geometry GLB reference
+  let geometryRef: any = null;
+  if (geoResult && geoResult.length > 0) {
+    for (const item of geoResult) {
+      if (item && typeof item === "object" && (item.path || item.url)) {
+        geometryRef = item;
+        break;
+      }
+    }
+  }
+
+  if (!geometryRef) {
+    throw new Error("No geometry output from TripoSG image_to_3d");
+  }
+
+  console.log("[Reconstruction] TripoSG: geometry generated:", geometryRef.path || geometryRef.url);
+  onProgress?.(60, "Applying AI texture...");
+
+  // Step 3: Run texture generation
+  // Params: image, mesh_path, seed
+  let texturedGlbPath: string | null = null;
+  try {
+    const texResult = await callNamedEndpoint(
+      TRIPOSG_SPACE_URL,
+      "/run_texture",
+      [imageRef, geometryRef, 0],
+      5 * 60 * 1000,
+      true,
+      (msg) => onProgress?.(75, msg)
+    );
+
+    if (texResult && texResult.length > 0) {
+      for (const item of texResult) {
+        if (item && typeof item === "object") {
+          const path = item.path || item.url;
+          if (path && typeof path === "string" && path.includes(".glb")) {
+            texturedGlbPath = path;
+            break;
+          }
+        }
+      }
+    }
+  } catch (texError) {
+    console.warn("[Reconstruction] TripoSG: texture generation failed:", (texError as Error).message);
+    // Fall back to downloading geometry-only
+  }
+
+  onProgress?.(90, "Downloading 3D model...");
+
+  // Download the final GLB (textured if available, geometry otherwise)
+  let glbBuffer: Buffer;
+  let hasTexture = false;
+
+  if (texturedGlbPath) {
+    glbBuffer = await downloadFile(TRIPOSG_SPACE_URL, texturedGlbPath, true);
+    hasTexture = true;
+    console.log("[Reconstruction] TripoSG: downloaded textured GLB:", glbBuffer.length, "bytes");
+  } else {
+    // Download geometry-only
+    const geoPath = geometryRef.path || geometryRef.url;
+    glbBuffer = await downloadFile(TRIPOSG_SPACE_URL, geoPath, true);
+    console.log("[Reconstruction] TripoSG: downloaded geometry GLB:", glbBuffer.length, "bytes");
+  }
+
+  if (!glbBuffer || glbBuffer.length === 0) {
+    throw new Error("Downloaded GLB is empty");
+  }
+
+  // Validate GLB magic bytes
+  if (glbBuffer.length > 4 && glbBuffer.readUInt32LE(0) !== 0x46546c67) {
+    throw new Error("Downloaded file is not a valid GLB");
+  }
+
+  onProgress?.(100, "3D model ready!");
+
+  return {
+    glbBuffer,
+    filename: `model_triposg_${Date.now()}.glb`,
+    hasNativeTexture: hasTexture,
+  };
 }
 
 /**
  * Main reconstruction function for single image with automatic fallback.
+ *
+ * Fallback chain:
+ * 1. TripoSG (textured output) - best quality but may hit GPU quota
+ * 2. frogleo/Image-to-3D (geometry-only) - reliable, always available
+ * 3. TRELLIS single-image (textured) - last resort
  */
 export async function reconstructImage(
   imageBuffer: Buffer,
   filename: string,
   onProgress?: (progress: number, message: string) => void
 ): Promise<ReconstructionResult> {
-  // Try primary space first
+  // Try TripoSG first (produces textured models)
+  try {
+    onProgress?.(5, "Connecting to AI texture service...");
+    return await reconstructWithTripoSG(imageBuffer, filename, onProgress);
+  } catch (tripoError) {
+    const tripoMsg = (tripoError as Error).message;
+    console.warn("[Reconstruction] TripoSG failed:", tripoMsg);
+    // Fall through to frogleo
+  }
+
+  // Try frogleo (reliable geometry-only)
   try {
     onProgress?.(5, "Connecting to reconstruction service...");
     return await reconstructSingleImage(imageBuffer, filename, onProgress);
   } catch (primaryError) {
     const errorMsg = (primaryError as Error).message;
-    console.error("[Reconstruction] Primary failed:", errorMsg);
+    console.error("[Reconstruction] Primary (frogleo) failed:", errorMsg);
 
-    // If it's a quota error or service unavailable, try fallback
+    // If it's a quota error or service unavailable, try TRELLIS
     if (
       errorMsg.includes("GPU quota") ||
       errorMsg.includes("503") ||
@@ -550,16 +828,16 @@ export async function reconstructImage(
         return await reconstructWithTrellisSingle(imageBuffer, filename, onProgress);
       } catch (fallbackError) {
         const fbMsg = (fallbackError as Error).message;
-        console.error("[Reconstruction] Fallback also failed:", fbMsg);
+        console.error("[Reconstruction] TRELLIS fallback also failed:", fbMsg);
 
         if (fbMsg.includes("GPU quota")) {
           throw new Error(
-            "Both reconstruction services have exceeded their GPU quota. " +
+            "All reconstruction services have exceeded their GPU quota. " +
             "This is a limitation of free HuggingFace Spaces. Please try again in a few hours."
           );
         }
         throw new Error(
-          `Reconstruction failed on both services. Primary: ${errorMsg}. Fallback: ${fbMsg}`
+          `Reconstruction failed on all services. Please try again later.`
         );
       }
     }

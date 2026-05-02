@@ -27,3 +27,9 @@
 - [x] Fix incorrect texture placement when multiple images are used for reconstruction
 - [x] Fix runtime crash on deployed production site (mobile) - "An unexpected error occurred"
 - [x] Fix incorrect texture mapping on generated 3D models - texture looks wrong
+- [x] Find and integrate a reconstruction API that natively outputs textured 3D models
+- [x] Remove manual texture projection in favor of API-native texturing
+- [x] Add TripoSG as primary backend (natively textured 3D models)
+- [x] Update ModelViewer to handle both textured and untextured models with attractive material
+- [x] Add fallback chain: TripoSG → frogleo → TRELLIS
+- [x] Add pipeline tests for hasNativeTexture field
