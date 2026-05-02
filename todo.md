@@ -44,3 +44,7 @@
 - [x] Add Stable Fast 3D (SF3D) as second backend (natively textured UV-unwrapped models)
 - [x] Implement AI multi-view texture atlas using built-in image generation + sharp
 - [x] Fix callNamedEndpoint to support both Gradio 4.x and 5.x API paths
+- [ ] Fix: AI multi-view atlas texture still looks distorted on complex shapes (Iron Man)
+- [ ] Find a reliable reconstruction API that outputs properly UV-unwrapped textured models
+- [x] Remove all texture application code - output geometry-only models
+- [x] Ensure ModelViewer shows clean untextured models with attractive material

@@ -6,8 +6,7 @@ import { z } from "zod";
 import { createReconstructionJob, getReconstructionJob, getUserReconstructionJobs, updateReconstructionJob } from "./db";
 import { storagePut } from "./storage";
 import { reconstructImage, reconstructMultipleImages } from "./reconstruction";
-import { applyTextureToGlb } from "./textureApply";
-import { generateMultiViewTexture } from "./aiTexture";
+
 import { nanoid } from "nanoid";
 
 export const appRouter = router({
@@ -97,47 +96,9 @@ export const appRouter = router({
               );
             }
 
-            // Apply texture if the model doesn't have native textures
-            let finalGlb = result.glbBuffer;
-            if (result.hasNativeTexture) {
-              console.log(`[Job ${jobId}] Model has native texture, skipping texture application`);
-            } else {
-              console.log(`[Job ${jobId}] Generating AI multi-view texture...`);
-              await updateReconstructionJob(jobId, { progress: 80 }).catch(() => {});
-
-              try {
-                // Generate multi-view texture atlas using AI
-                const atlasBuffer = await generateMultiViewTexture(
-                  imageBuffers[0].buffer,
-                  (msg) => console.log(`[Job ${jobId}] ${msg}`)
-                );
-
-                console.log(`[Job ${jobId}] Applying atlas texture to model...`);
-                await updateReconstructionJob(jobId, { progress: 92 }).catch(() => {});
-
-                finalGlb = await applyTextureToGlb(
-                  result.glbBuffer,
-                  atlasBuffer,
-                  "image/png",
-                  "atlas"
-                );
-                console.log(`[Job ${jobId}] Atlas texture applied successfully (${finalGlb.length} bytes)`);
-              } catch (texError) {
-                console.warn(`[Job ${jobId}] AI texture generation failed, falling back to front projection:`, texError);
-                // Fallback: use simple front projection with original image
-                try {
-                  finalGlb = await applyTextureToGlb(
-                    result.glbBuffer,
-                    imageBuffers[0].buffer,
-                    "image/png",
-                    "front"
-                  );
-                  console.log(`[Job ${jobId}] Fallback front texture applied (${finalGlb.length} bytes)`);
-                } catch (fallbackError) {
-                  console.warn(`[Job ${jobId}] Fallback texture also failed, using untextured model:`, fallbackError);
-                }
-              }
-            }
+            // Output the model directly (geometry-only with clean material in viewer)
+            const finalGlb = result.glbBuffer;
+            console.log(`[Job ${jobId}] Model ready (${finalGlb.length} bytes)`);
 
             // Upload the GLB model to S3
             const modelKey = `reconstructions/${userId}/${uniqueId}/model.glb`;
