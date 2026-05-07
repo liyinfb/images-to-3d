@@ -51,3 +51,5 @@
 - [x] Create README.md with UI screenshots, features, and installation guide
 - [x] Add Docker Compose setup for local development
 - [x] Remove MinIO/S3 from Docker Compose - use local filesystem storage instead
+- [x] Add OBJ export option in 3D viewer
+- [x] Add STL export option in 3D viewer

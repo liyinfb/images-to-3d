@@ -1,10 +1,12 @@
 import { Canvas } from "@react-three/fiber";
 import { OrbitControls, Center, ContactShadows } from "@react-three/drei";
-import { Suspense, useEffect, useRef, useState, Component, type ReactNode } from "react";
-import { Loader2, Download, AlertCircle, RotateCcw } from "lucide-react";
+import { Suspense, useEffect, useRef, useState, useCallback, Component, type ReactNode } from "react";
+import { Loader2, Download, AlertCircle, RotateCcw, ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { OBJExporter } from "three/examples/jsm/exporters/OBJExporter.js";
+import { STLExporter } from "three/examples/jsm/exporters/STLExporter.js";
 
 /**
  * Local error boundary specifically for the 3D Canvas.
@@ -111,7 +113,7 @@ function applyDefaultMaterial(scene: THREE.Group) {
   });
 }
 
-function Model({ url }: { url: string }) {
+function Model({ url, onSceneReady }: { url: string; onSceneReady: (scene: THREE.Group) => void }) {
   const groupRef = useRef<THREE.Group>(null);
   const [loaded, setLoaded] = useState(false);
 
@@ -168,6 +170,7 @@ function Model({ url }: { url: string }) {
           applyDefaultMaterial(model);
         }
 
+        onSceneReady(group);
         setLoaded(true);
       },
       undefined,
@@ -221,6 +224,95 @@ function SceneLighting() {
   );
 }
 
+/**
+ * Export dropdown component for downloading models in different formats.
+ */
+function ExportDropdown({
+  onExport,
+  onDownloadGlb,
+}: {
+  onExport: (format: "obj" | "stl") => void;
+  onDownloadGlb?: () => void;
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  return (
+    <div className="relative" ref={dropdownRef}>
+      <div className="flex items-center gap-0">
+        {onDownloadGlb && (
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={onDownloadGlb}
+            className="gap-2 glass-panel rounded-r-none border-r border-border/30"
+          >
+            <Download className="w-4 h-4" />
+            Download GLB
+          </Button>
+        )}
+        <Button
+          size="sm"
+          variant="secondary"
+          onClick={() => setIsOpen(!isOpen)}
+          className={`glass-panel px-2 ${onDownloadGlb ? "rounded-l-none" : "gap-2"}`}
+        >
+          {!onDownloadGlb && <Download className="w-4 h-4" />}
+          <ChevronDown className={`w-4 h-4 transition-transform ${isOpen ? "rotate-180" : ""}`} />
+        </Button>
+      </div>
+
+      {isOpen && (
+        <div className="absolute bottom-full right-0 mb-2 w-44 rounded-lg border border-border/50 bg-popover/95 backdrop-blur-md shadow-xl overflow-hidden z-50">
+          <div className="p-1">
+            <button
+              onClick={() => {
+                onDownloadGlb?.();
+                setIsOpen(false);
+              }}
+              className="w-full flex items-center gap-3 px-3 py-2 text-sm text-popover-foreground hover:bg-accent rounded-md transition-colors"
+            >
+              <span className="text-xs font-mono text-muted-foreground w-8">.glb</span>
+              <span>GLB (Binary glTF)</span>
+            </button>
+            <button
+              onClick={() => {
+                onExport("obj");
+                setIsOpen(false);
+              }}
+              className="w-full flex items-center gap-3 px-3 py-2 text-sm text-popover-foreground hover:bg-accent rounded-md transition-colors"
+            >
+              <span className="text-xs font-mono text-muted-foreground w-8">.obj</span>
+              <span>OBJ (Wavefront)</span>
+            </button>
+            <button
+              onClick={() => {
+                onExport("stl");
+                setIsOpen(false);
+              }}
+              className="w-full flex items-center gap-3 px-3 py-2 text-sm text-popover-foreground hover:bg-accent rounded-md transition-colors"
+            >
+              <span className="text-xs font-mono text-muted-foreground w-8">.stl</span>
+              <span>STL (3D Print)</span>
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 interface ModelViewerProps {
   modelUrl: string;
   onDownload?: () => void;
@@ -229,6 +321,45 @@ interface ModelViewerProps {
 
 export default function ModelViewer({ modelUrl, onDownload, className = "" }: ModelViewerProps) {
   const [isLoading, setIsLoading] = useState(true);
+  const sceneRef = useRef<THREE.Group | null>(null);
+
+  const handleSceneReady = useCallback((scene: THREE.Group) => {
+    sceneRef.current = scene;
+  }, []);
+
+  const handleExport = useCallback((format: "obj" | "stl") => {
+    const scene = sceneRef.current;
+    if (!scene) return;
+
+    let data: string | ArrayBuffer;
+    let mimeType: string;
+    let extension: string;
+
+    if (format === "obj") {
+      const exporter = new OBJExporter();
+      data = exporter.parse(scene);
+      mimeType = "text/plain";
+      extension = "obj";
+    } else {
+      const exporter = new STLExporter();
+      const result = exporter.parse(scene, { binary: true });
+      // STLExporter with binary:true returns a DataView; extract the underlying ArrayBuffer
+      data = result instanceof DataView ? result.buffer : result;
+      mimeType = "application/octet-stream";
+      extension = "stl";
+    }
+
+    // Trigger download
+    const blob = new Blob([data], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `model.${extension}`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }, []);
 
   return (
     <div className={`relative rounded-xl overflow-hidden ${className}`}>
@@ -268,7 +399,7 @@ export default function ModelViewer({ modelUrl, onDownload, className = "" }: Mo
 
             <Suspense fallback={<LoadingFallback />}>
               <Center>
-                <Model url={modelUrl} />
+                <Model url={modelUrl} onSceneReady={handleSceneReady} />
               </Center>
               <ContactShadows
                 position={[0, -1.5, 0]}
@@ -300,17 +431,7 @@ export default function ModelViewer({ modelUrl, onDownload, className = "" }: Mo
             Drag to rotate &middot; Scroll to zoom
           </span>
         </div>
-        {onDownload && (
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={onDownload}
-            className="gap-2 glass-panel"
-          >
-            <Download className="w-4 h-4" />
-            Download GLB
-          </Button>
-        )}
+        <ExportDropdown onExport={handleExport} onDownloadGlb={onDownload} />
       </div>
 
       {/* Radial glow behind model */}
