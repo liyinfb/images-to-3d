@@ -183,7 +183,7 @@ pnpm start
 
 ## Docker Compose (Local Development)
 
-The easiest way to run the full stack locally is with Docker Compose. This sets up the application, a MySQL database, and a MinIO S3-compatible storage service.
+The easiest way to run the full stack locally is with Docker Compose. This sets up the application and a MySQL database. File storage uses the local filesystem (no S3 or MinIO needed).
 
 ### Quick Start
 
@@ -191,7 +191,7 @@ The easiest way to run the full stack locally is with Docker Compose. This sets 
 # Copy the example environment file
 cp env.example.txt .env
 
-# Edit .env with your API keys (BUILT_IN_FORGE_API_KEY, JWT_SECRET, etc.)
+# Edit .env with your credentials (JWT_SECRET, VITE_APP_ID, etc.)
 
 # Start all services (database migrations run automatically on first boot)
 docker compose up -d
@@ -208,7 +208,6 @@ The application will be available at **http://localhost:3000**.
 |---------|------|-------------|
 | `app` | 3000 | 3D Reconstructor application |
 | `db` | 3306 | MySQL 8.0 database |
-| `minio` | 9000 / 9001 | MinIO S3-compatible storage (API / Console) |
 
 ### Stopping
 
