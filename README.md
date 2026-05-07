@@ -189,15 +189,12 @@ The easiest way to run the full stack locally is with Docker Compose. This sets 
 
 ```bash
 # Copy the example environment file
-cp .env.example .env
+cp env.example.txt .env
 
 # Edit .env with your API keys (BUILT_IN_FORGE_API_KEY, JWT_SECRET, etc.)
 
-# Start all services
+# Start all services (database migrations run automatically on first boot)
 docker compose up -d
-
-# Push database schema (first time only)
-docker compose exec app pnpm db:push
 
 # View logs
 docker compose logs -f app
