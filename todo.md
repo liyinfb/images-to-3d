@@ -48,3 +48,5 @@
 - [ ] Find a reliable reconstruction API that outputs properly UV-unwrapped textured models
 - [x] Remove all texture application code - output geometry-only models
 - [x] Ensure ModelViewer shows clean untextured models with attractive material
+- [x] Create README.md with UI screenshots, features, and installation guide
+- [x] Add Docker Compose setup for local development
