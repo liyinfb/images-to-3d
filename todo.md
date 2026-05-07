@@ -58,3 +58,4 @@
 - [x] Add signup/login pages for local auth mode
 - [x] Update README with local auth instructions
 - [x] Write tests for local auth routes (15 tests)
+- [x] Audit and remove unused dependencies from texture processing era
