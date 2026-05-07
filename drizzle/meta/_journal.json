@@ -22,6 +22,13 @@
       "when": 1777622199628,
       "tag": "0002_elite_toxin",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "5",
+      "when": 1778147729004,
+      "tag": "0003_outstanding_emma_frost",
+      "breakpoints": true
     }
   ]
 }

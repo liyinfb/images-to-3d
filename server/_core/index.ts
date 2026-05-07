@@ -5,10 +5,12 @@ import net from "net";
 import path from "path";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { registerOAuthRoutes } from "./oauth";
+import { registerLocalAuthRoutes } from "../localAuth";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
 import { isLocalStorage, getLocalStorageDir } from "../storage";
+import { ENV } from "./env";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -39,8 +41,21 @@ async function startServer() {
   if (isLocalStorage()) {
     app.use('/uploads', express.static(getLocalStorageDir()));
   }
-  // OAuth callback under /api/oauth/callback
-  registerOAuthRoutes(app);
+  // Register auth routes based on mode
+  if (ENV.isLocalAuth) {
+    console.log("[Auth] Local auth mode enabled (email/password)");
+    registerLocalAuthRoutes(app);
+  } else {
+    console.log("[Auth] Manus OAuth mode enabled");
+    registerOAuthRoutes(app);
+  }
+
+  // Auth mode endpoint (available in both modes for frontend detection)
+  if (!ENV.isLocalAuth) {
+    app.get("/api/auth/mode", (_req, res) => {
+      res.json({ mode: "oauth" });
+    });
+  }
   // tRPC API
   app.use(
     "/api/trpc",

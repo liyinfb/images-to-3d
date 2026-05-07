@@ -7,11 +7,13 @@ import { ThemeProvider } from "./contexts/ThemeContext";
 import Home from "./pages/Home";
 import Reconstruct from "./pages/Reconstruct";
 import History from "./pages/History";
+import LocalAuth from "./pages/LocalAuth";
 
 function Router() {
   return (
     <Switch>
       <Route path={"/"} component={Home} />
+      <Route path={"/login"} component={LocalAuth} />
       <Route path={"/reconstruct"} component={Reconstruct} />
       <Route path={"/history"} component={History} />
       <Route path={"/404"} component={NotFound} />

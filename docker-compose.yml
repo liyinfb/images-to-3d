@@ -11,9 +11,12 @@ services:
       - NODE_ENV=production
       - DATABASE_URL=mysql://reconstructor:reconstructor@db:3306/reconstructor
       - JWT_SECRET=${JWT_SECRET:-change-me-in-production}
-      - VITE_APP_ID=${VITE_APP_ID:-}
-      - OAUTH_SERVER_URL=${OAUTH_SERVER_URL:-https://api.manus.im}
-      - VITE_OAUTH_PORTAL_URL=${VITE_OAUTH_PORTAL_URL:-https://manus.im/app-auth}
+      - LOCAL_AUTH=true
+      - VITE_LOCAL_AUTH=true
+      # OAuth vars (only needed if LOCAL_AUTH is not set)
+      # - VITE_APP_ID=${VITE_APP_ID:-}
+      # - OAUTH_SERVER_URL=${OAUTH_SERVER_URL:-}
+      # - VITE_OAUTH_PORTAL_URL=${VITE_OAUTH_PORTAL_URL:-}
       - OWNER_OPEN_ID=${OWNER_OPEN_ID:-}
       - OWNER_NAME=${OWNER_NAME:-}
     volumes:

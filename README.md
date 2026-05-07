@@ -26,7 +26,7 @@ An AI-powered web application that transforms 2D photographs into interactive 3D
 | **GLB Export** | Download models in GLB format, compatible with Blender, Unity, Unreal Engine, and other 3D tools |
 | **Reconstruction History** | All past jobs are saved and accessible with status tracking, timestamps, and source images |
 | **Multi-Backend Fallback** | Automatic failover chain (TripoSG → SF3D → frogleo → TRELLIS) ensures high availability |
-| **OAuth Authentication** | Secure user authentication via Manus OAuth |
+| **Dual Authentication** | Manus OAuth (production) or local email/password (Docker Compose) |
 | **Responsive Design** | Works on desktop, tablet, and mobile devices |
 
 ---
@@ -183,7 +183,7 @@ pnpm start
 
 ## Docker Compose (Local Development)
 
-The easiest way to run the full stack locally is with Docker Compose. This sets up the application and a MySQL database. File storage uses the local filesystem (no S3 or MinIO needed).
+The easiest way to run the full stack locally is with Docker Compose. This sets up the application and a MySQL database. File storage uses the local filesystem (no S3 or MinIO needed). Authentication uses local email/password (no Manus OAuth required).
 
 ### Quick Start
 
@@ -191,7 +191,8 @@ The easiest way to run the full stack locally is with Docker Compose. This sets 
 # Copy the example environment file
 cp env.example.txt .env
 
-# Edit .env with your credentials (JWT_SECRET, VITE_APP_ID, etc.)
+# Edit .env — at minimum set JWT_SECRET to a random string
+# LOCAL_AUTH=true is already set by default for Docker mode
 
 # Start all services (database migrations run automatically on first boot)
 docker compose up -d
@@ -201,6 +202,15 @@ docker compose logs -f app
 ```
 
 The application will be available at **http://localhost:3000**.
+
+### Authentication Modes
+
+| Mode | When Active | How Users Authenticate |
+|------|-------------|------------------------|
+| **Local Auth** | `LOCAL_AUTH=true` or `OAUTH_SERVER_URL` not set | Email + password (bcrypt hashed) |
+| **Manus OAuth** | `OAUTH_SERVER_URL` is set and `LOCAL_AUTH` is not `true` | Redirect to Manus OAuth portal |
+
+Docker Compose defaults to **Local Auth** mode. Users can sign up and sign in with email and password directly — no external OAuth provider needed.
 
 ### Services
 

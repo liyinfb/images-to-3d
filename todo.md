@@ -53,3 +53,8 @@
 - [x] Remove MinIO/S3 from Docker Compose - use local filesystem storage instead
 - [x] Add OBJ export option in 3D viewer
 - [x] Add STL export option in 3D viewer
+- [x] Add local email/password auth for Docker Compose (bypass Manus OAuth)
+- [x] Hash passwords with bcrypt
+- [x] Add signup/login pages for local auth mode
+- [x] Update README with local auth instructions
+- [x] Write tests for local auth routes (15 tests)
