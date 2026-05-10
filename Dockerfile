@@ -20,23 +20,19 @@ WORKDIR /app
 
 RUN corepack enable && corepack prepare pnpm@10.4.1 --activate
 
-# Install all dependencies (drizzle-kit needed for migrations)
+# Install production dependencies (drizzle-kit needed for migrations)
 COPY package.json pnpm-lock.yaml ./
 COPY patches/ ./patches/
 RUN pnpm install --frozen-lockfile
 
-# Copy built assets
+# Copy built assets (vite outputs to dist/public, esbuild outputs to dist/index.js)
 COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/client/dist ./client/dist
 COPY --from=builder /app/drizzle ./drizzle
 COPY --from=builder /app/drizzle.config.ts ./drizzle.config.ts
 
 # Copy entrypoint script
 COPY docker-entrypoint.sh ./docker-entrypoint.sh
 RUN chmod +x ./docker-entrypoint.sh
-
-# Sharp requires platform-specific binaries
-RUN pnpm rebuild sharp
 
 ENV NODE_ENV=production
 ENV PORT=3000
