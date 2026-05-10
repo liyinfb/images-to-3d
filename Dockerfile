@@ -12,6 +12,17 @@ WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@10.4.1 --activate
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+
+# VITE_ env vars are inlined at build time by Vite.
+# Set LOCAL_AUTH=true so the frontend uses /login instead of OAuth.
+# Clear OAuth vars so they don't get baked into the bundle.
+ARG VITE_LOCAL_AUTH=true
+ARG VITE_OAUTH_PORTAL_URL=
+ARG VITE_APP_ID=
+ENV VITE_LOCAL_AUTH=${VITE_LOCAL_AUTH}
+ENV VITE_OAUTH_PORTAL_URL=${VITE_OAUTH_PORTAL_URL}
+ENV VITE_APP_ID=${VITE_APP_ID}
+
 RUN pnpm build
 
 # Stage 3: Production image

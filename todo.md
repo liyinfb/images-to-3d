@@ -61,3 +61,4 @@
 - [x] Audit and remove unused dependencies from texture processing era
 - [x] Fix progress polling stopping when user switches browser tab/window
 - [x] Fix Docker build error: /app/client/dist not found in builder stage
+- [x] Fix TypeError: Invalid URL when visiting locally Docker-deployed app (missing VITE_ env vars)
