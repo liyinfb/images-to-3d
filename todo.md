@@ -59,3 +59,4 @@
 - [x] Update README with local auth instructions
 - [x] Write tests for local auth routes (15 tests)
 - [x] Audit and remove unused dependencies from texture processing era
+- [x] Fix progress polling stopping when user switches browser tab/window

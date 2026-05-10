@@ -23,12 +23,13 @@ export default function Reconstruct() {
 
   const createMutation = trpc.reconstruction.create.useMutation();
 
-  // Poll for job status
+  // Poll for job status (refetchIntervalInBackground keeps polling even when tab is hidden)
   const statusQuery = trpc.reconstruction.status.useQuery(
     { jobId: jobId! },
     {
       enabled: jobId !== null && state === "processing",
       refetchInterval: 3000,
+      refetchIntervalInBackground: true,
     }
   );
 
