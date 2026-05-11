@@ -62,3 +62,4 @@
 - [x] Fix progress polling stopping when user switches browser tab/window
 - [x] Fix Docker build error: /app/client/dist not found in builder stage
 - [x] Fix TypeError: Invalid URL when visiting locally Docker-deployed app (missing VITE_ env vars)
+- [x] Fix persistent Invalid URL error: wrap new URL() in try-catch, use ENV (not ARG) in Dockerfile to prevent .env override
