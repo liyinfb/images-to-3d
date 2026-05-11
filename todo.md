@@ -65,3 +65,4 @@
 - [x] Fix persistent Invalid URL error: wrap new URL() in try-catch, use ENV (not ARG) in Dockerfile to prevent .env override
 - [x] Fix local Docker auth: login succeeds but session cookie not persisted (user not recognized as logged in)
 - [x] Exclude passwordHash from auth.me API response for security
+- [x] Fix JWT appId empty string causing verifySession to reject valid tokens in Docker local mode
